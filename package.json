@@ -1,0 +1,30 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "This project was bootstrapped with Fastify-CLI.",
+  "main": "app.js",
+  "type": "module",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "node --test test/**/*.test.js",
+    "start": "node src/index",
+    "dev": "nodemon src/index"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/autoload": "^6.0.0",
+    "@fastify/mysql": "^5.0.0",
+    "@fastify/sensible": "^6.0.0",
+    "axios": "^1.7.7",
+    "fastify": "^5.0.0",
+    "fastify-cli": "^7.0.0",
+    "fastify-plugin": "^5.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.5"
+  }
+}
