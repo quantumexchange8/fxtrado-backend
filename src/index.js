@@ -3,10 +3,15 @@ import Fastify from "fastify";
 // import UserController from './UserController.js'
 import fastifyMysql from "@fastify/mysql";
 import axios from 'axios';
+import websocket from '@fastify/websocket';
+import { startVolumeCreation } from './cronJobs.js';
 
 const fastify = Fastify({
     logger: true
 });
+
+// Register the WebSocket plugin
+fastify.register(websocket);
 
 // API
 const OANDA_API_KEY = 'e7b1a197-9540-4696-8330-f6cc625aedd5'; 
@@ -26,7 +31,7 @@ let exchangeRateData = {};
 const fetchSymbols = async (connection) => {
   try {
     // Query to get base and quote from the forex_pairs table
-    const [rows] = await connection.query('SELECT base, quote FROM forex_pairs');
+    const [rows] = await connection.query('SELECT base, quote FROM forex_pairs WHERE status = "active" ');
     
     // Map the result into the symbols array format
     const symbols = rows.map(row => ({
@@ -67,13 +72,13 @@ const fetchExchangeRate = async () => {
       const remark = 'OANDA';
       const symbols = `${symbol.base}/${symbol.quote}`;
       const currentDate = new Date();
-      const date = currentDate.getFullYear() + '-' +
-               String(currentDate.getMonth() + 1).padStart(2, '0') + '-' +
-               String(currentDate.getDate()).padStart(2, '0') + ' ' +
-               String(currentDate.getHours()).padStart(2, '0') + ':' +
-               String(currentDate.getMinutes()).padStart(2, '0') + ':' +
-               String(currentDate.getSeconds()).padStart(2, '0') + '.' +
-               String(currentDate.getMilliseconds()).padStart(3, '0');
+      const date = currentDate.getUTCFullYear() + '-' +
+             String(currentDate.getUTCMonth() + 1).padStart(2, '0') + '-' +
+             String(currentDate.getUTCDate()).padStart(2, '0') + ' ' +
+             String(currentDate.getUTCHours()).padStart(2, '0') + ':' +
+             String(currentDate.getUTCMinutes()).padStart(2, '0') + ':' +
+             String(currentDate.getUTCSeconds()).padStart(2, '0') + '.' +
+             String(currentDate.getUTCMilliseconds()).padStart(3, '0');
                
       await connection.query(
         'INSERT INTO ticks (Date, Symbol, Bid, Ask, Remark) VALUES (?, ?, ?, ?, ?)',
@@ -88,7 +93,7 @@ const fetchExchangeRate = async () => {
   }
 };
 
-setInterval(fetchExchangeRate, 300);
+setInterval(fetchExchangeRate, 500);
 
 fastify.get('/currentPrice', async (request, reply) => {
   if (!exchangeRateData || Object.keys(exchangeRateData).length === 0) {
@@ -99,33 +104,70 @@ fastify.get('/currentPrice', async (request, reply) => {
   reply.send({ exchangeRateData });
 });
 
-fastify.get('/getTicks', async (request, reply) => {
-  try {
-    // Get a connection to the MySQL database
-    const connection = await fastify.mysql.getConnection();
+startVolumeCreation(fastify);
 
-    // Execute a query to retrieve all data from the 'ticks' table
-    const [rows, fields] = await connection.query('SELECT * FROM ticks');
+fastify.register(async function (fastify) {
+  fastify.get('/webSocket', { websocket: true }, async (socket /* WebSocket */, req /* FastifyRequest */) => {
+    console.log('Client connected!');
 
-    // Release the connection back to the pool
-    connection.release();
+    // Fetch forex pairs from the forex_pairs table
+    const [forexPairs] = await fastify.mysql.query('SELECT currency_pair FROM forex_pairs WHERE status = "active"'); // Assuming fastify.db is your database connection
 
-    // Send the fetched data as the response
-    reply.send({
-      success: true,
-      data: rows
+    // Function to get the latest bid and ask price for a specific pair
+    const getLatestPrices = async (symbol) => {
+      const result = await fastify.mysql.query(
+        'SELECT bid, ask FROM fxtrado.ticks WHERE symbol = ? ORDER BY Date DESC LIMIT 1',
+        [symbol]
+      );
+
+      return result[0]; // Return the latest tick
+    };
+
+    // Periodically fetch and send the latest bid/ask prices to the client
+    const interval = setInterval(async () => {
+      for (const pair of forexPairs) {
+        const latestPrices = await getLatestPrices(pair.currency_pair); // Assuming 'symbol' is the column name in forex_pairs
+        
+        if (latestPrices && latestPrices.length > 0) {
+          const latestPrice = latestPrices[0];
+
+          socket.send(JSON.stringify({
+            symbol: pair.currency_pair,
+            bid: latestPrice.bid,
+            ask: latestPrice.ask,
+          }));
+        }
+      }
+    }, 1000); // Fetch every 1 second
+
+    // Handle client disconnect
+    socket.on('close', () => {
+      console.log('Client disconnected');
+      clearInterval(interval); // Clear interval when the client disconnects
     });
-  } catch (error) {
-    // Handle any errors that occur during the query
-    console.error('Error fetching ticks data:', error);
-    reply.status(500).send({
-      success: false,
-      message: 'Failed to fetch ticks data',
-      error: error.message
-    });
-  }
+  });
 });
 
+
+// fastify.get('/webSocket', { websocket: true }, (connection /* SocketStream */, req) => {
+//   console.log('Client connected!');
+
+//   // Send a welcome message
+//   connection.write('Welcome to Fastify WebSocket!');
+
+//   // Handle incoming messages from client
+//   connection.on('message', (message) => {
+//     console.log(`Received message from client: ${message}`);
+    
+//     // Echo the message back to the client
+//     connection.write(`You said: ${message}`);
+//   });
+
+//   // Handle client disconnect
+//   connection.on('close', () => {
+//     console.log('Client disconnected');
+//   });
+// });
 
 const start = async () => {
   try {
