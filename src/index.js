@@ -42,11 +42,12 @@ let exchangeRateData = {};
 const fetchSymbols = async (connection) => {
   try {
     // Query to get base and quote from the forex_pairs table
-    const [rows] = await connection.query('SELECT currency_pair FROM forex_pairs WHERE status = "active"');
+    const [rows] = await connection.query('SELECT currency_pair, symbol_pair FROM forex_pairs WHERE status = "active"');
     
     // Map the result into the symbols array format
     return rows.map(row => ({
       currency_pair: row.currency_pair,
+      symbol_pair: row.symbol_pair,
     }));
   } catch (error) {
     console.error('Error fetching forex pairs:', error);
@@ -74,6 +75,7 @@ const fetchExchangeRate = async () => {
     const fetchTasks = symbols.map(async (symbol) => {
       
       const { currency_pair } = symbol;
+      const { symbol_pair } = symbol;
 
       try {
         const response = await axios.get(OANDA_PRICE_URL, {
@@ -95,7 +97,7 @@ const fetchExchangeRate = async () => {
         // Additional information
         const instrument = priceData.instrument;
         const remark = 'OANDA';
-        const symbolPair = instrument;
+        const symbolPair = symbol_pair;
 
         return [date, symbolPair, bid, ask, remark];
       } catch (error) {
@@ -197,7 +199,7 @@ fastify.register(async function (fastify) {
     console.log('Client connected!');
 
     // Fetch forex pairs from the forex_pairs table
-    const [forexPairs] = await fastify.mysql.query('SELECT currency_pair FROM forex_pairs WHERE status = "active"'); // Assuming fastify.db is your database connection
+    const [forexPairs] = await fastify.mysql.query('SELECT currency_pair, symbol_pair FROM forex_pairs WHERE status = "active"'); // Assuming fastify.db is your database connection
 
     // Function to get the latest bid and ask price for a specific pair
     const getAllLatestPrices = async () => {
@@ -249,13 +251,13 @@ const openOrderSchema = {
       symbol: { type: 'string' },
       price: { type: 'number' },
       type: { type: 'string', enum: ['buy', 'sell'] }, // You can validate the action as 'buy' or 'sell'
-      volumn: { type: 'number' }
+      volume: { type: 'number' }
     }
   }
 };
 
 fastify.post('/api/openOrders', { schema: openOrderSchema }, async (request, reply) => {
-  const { user_id, symbol, price, type, volumn, status } = request.body;
+  const { user_id, symbol, price, type, volume, status } = request.body;
   const currentDate = new Date(); 
   const open_time = formatDate(currentDate);
   
@@ -263,8 +265,8 @@ fastify.post('/api/openOrders', { schema: openOrderSchema }, async (request, rep
   try {
     // Example: Insert the order data into your database (MySQL, PostgreSQL, etc.)
     const result = await fastify.mysql.query(
-      'INSERT INTO orders (user_id, symbol, price, type, volumn, open_time, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [user_id, symbol, price, type, volumn, open_time, status]
+      'INSERT INTO orders (user_id, symbol, price, type, volume, open_time, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [user_id, symbol, price, type, volume, open_time, status]
     );
 
     // Reply with success response
