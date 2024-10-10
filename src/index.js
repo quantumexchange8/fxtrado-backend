@@ -4,18 +4,29 @@ import Fastify from "fastify";
 import fastifyMysql from "@fastify/mysql";
 import axios from 'axios';
 import websocket from '@fastify/websocket';
+import cors from '@fastify/cors';
 import { startVolumeCreation } from './cronJobs.js';
+import Sensible from '@fastify/sensible'
 
 const fastify = Fastify({
     logger: true
+});
+
+fastify.register(cors, {
+  origin: ['http://127.0.0.1:8000', 'http://127.0.0.1:8010'], // Allow your frontend origins
+  methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allow methods used in your API
+  credentials: true, // If your API requires credentials (cookies, HTTP authentication)
 });
 
 // Register the WebSocket plugin
 fastify.register(websocket);
 
 // API
-const OANDA_API_KEY = 'e7b1a197-9540-4696-8330-f6cc625aedd5'; 
-const OANDA_BASE_URL = 'https://exchange-rates-api.oanda.com';
+const OANDA_API_KEY = 'cade200b33a840342cb1f08a79e2c5cd-ed020510413913fe81d60579a39711de'; 
+const account_id = '101-003-30075838-001';
+const instrument = 'EUR_USD'
+// const OANDA_CANDLES = `https://api-fxpractice.oanda.com/v3/instruments/`;
+const OANDA_PRICE_URL = `https://api-fxpractice.oanda.com/v3/accounts/${account_id}/pricing`
 
 // Database Access
 fastify.register(fastifyMysql, {
@@ -31,19 +42,17 @@ let exchangeRateData = {};
 const fetchSymbols = async (connection) => {
   try {
     // Query to get base and quote from the forex_pairs table
-    const [rows] = await connection.query('SELECT base, quote FROM forex_pairs WHERE status = "active"');
+    const [rows] = await connection.query('SELECT currency_pair FROM forex_pairs WHERE status = "active"');
     
     // Map the result into the symbols array format
     return rows.map(row => ({
-      base: row.base,
-      quote: row.quote
+      currency_pair: row.currency_pair,
     }));
   } catch (error) {
     console.error('Error fetching forex pairs:', error);
     return [];
   }
 };
-
 
 const fetchExchangeRate = async () => {
   let connection;
@@ -63,24 +72,34 @@ const fetchExchangeRate = async () => {
 
     // Fetch data in parallel using `Promise.all`
     const fetchTasks = symbols.map(async (symbol) => {
-      const { base, quote } = symbol;
+      
+      const { currency_pair } = symbol;
 
       try {
-        const response = await axios.get(`${OANDA_BASE_URL}/v2/rates/spot.json`, {
-          headers: { 'Authorization': `Bearer ${OANDA_API_KEY}` },
-          params: { base, quote }
+        const response = await axios.get(OANDA_PRICE_URL, {
+          headers: { 
+            'Authorization': `Bearer ${OANDA_API_KEY}`,
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          }, 
+          params: {
+            instruments: currency_pair
+          }
         });
 
-        // Extract the quotes data
-        const quotes = response.data.quotes[0]; // Assuming there's always one quote
-        const bid = quotes.bid;
-        const ask = quotes.ask;
+        // Logging the data
+        const priceData = response.data.prices[0];
+        const bid = priceData.bids[0].price;
+        const ask = priceData.asks[0].price;
+
+        // Additional information
+        const instrument = priceData.instrument;
         const remark = 'OANDA';
-        const symbolPair = `${base}/${quote}`;
+        const symbolPair = instrument;
 
         return [date, symbolPair, bid, ask, remark];
       } catch (error) {
-        console.error(`Failed to fetch data for ${base}/${quote}:`, error.message);
+        console.error(`Failed to fetch data for ${currency_pair}:`, error.message);
         return null; // Return null if the request fails
       }
     });
@@ -89,7 +108,6 @@ const fetchExchangeRate = async () => {
     const results = (await Promise.all(fetchTasks)).filter(result => result !== null);
 
     if (results.length > 0) {
-      // Use bulk insert instead of individual inserts
       await connection.query(
         'INSERT INTO ticks (Date, Symbol, Bid, Ask, Remark) VALUES ?',
         [results]
@@ -107,16 +125,72 @@ const fetchExchangeRate = async () => {
 
 setInterval(fetchExchangeRate, 500);
 
-fastify.get('/currentPrice', async (request, reply) => {
-  if (!exchangeRateData || Object.keys(exchangeRateData).length === 0) {
-    return reply.status(500).send({
-      error: 'No data available',
-    });
-  }
-  reply.send({ exchangeRateData });
-});
+// TEMPORARY OFF FIRST
+// const getLastMinuteCandle = async () => {
+//   let connection;
 
-startVolumeCreation(fastify);
+//   try {
+//     connection = await fastify.mysql.getConnection();
+//     const symbols = await fetchSymbols(connection);
+
+//     const currentDate = new Date();
+//     const date = currentDate.getUTCFullYear() + '-' +
+//                  String(currentDate.getUTCMonth() + 1).padStart(2, '0') + '-' +
+//                  String(currentDate.getUTCDate()).padStart(2, '0') + ' ' +
+//                  String(currentDate.getUTCHours()).padStart(2, '0') + ':' +
+//                  String(currentDate.getUTCMinutes()).padStart(2, '0') + ':' +
+//                  String(currentDate.getUTCSeconds()).padStart(2, '0') + '.' +
+//                  String(currentDate.getUTCMilliseconds()).padStart(3, '0');
+
+//     const fetchTasks = symbols.map(async (symbol) => {
+
+//     const { currency_pair } = symbol;
+
+//     try {
+//       const response = await axios.get(`https://api-fxpractice.oanda.com/v3/instruments/${currency_pair}/candles`, {
+//         headers: { 
+//           'Authorization': `Bearer ${OANDA_API_KEY}`,
+//           'Accept': 'application/json',
+//           'Content-Type': 'application/json',
+//         },
+//         params: {
+//           price: 'M', // Get bid/ask prices
+//           granularity: 'M1', // 1-minute candles
+//           count: 1 // Get the latest candle (set count to 1)
+//         }
+//       });
+
+//       console.log('res', response.data.candles[0])
+//       const instrument = response.data.instrument;
+//       const candle = response.data.candles[0];
+//       const open = candle.mid.o;
+//       const high = candle.mid.h;
+//       const low = candle.mid.l;
+//       const close = candle.mid.c;
+//       const symbolPair = instrument;
+      
+//       return [date, open, high, low, close], symbolPair;
+
+//     } catch (error) {
+//       console.error(`Failed to fetch data for ${currency_pair}:`, error.message);
+//       return null; // Return null if the request fails
+//     }
+//   });
+
+//   if (results.length > 0) {
+//     await connection.query(
+//       'INSERT INTO ticks (Date, Symbol, Bid, Ask, Remark) VALUES ?',
+//       [results]
+//     );
+//   }
+
+//   } catch (error) {
+//     console.error(`Failed to fetch data for ${currency_pair}:`, error.message);
+//   }
+// }
+
+// setInterval(getLastMinuteCandle, 60000);
+
 
 fastify.register(async function (fastify) {
   fastify.get('/forex_pair', { websocket: true }, async (socket /* WebSocket */, req /* FastifyRequest */) => {
@@ -126,29 +200,35 @@ fastify.register(async function (fastify) {
     const [forexPairs] = await fastify.mysql.query('SELECT currency_pair FROM forex_pairs WHERE status = "active"'); // Assuming fastify.db is your database connection
 
     // Function to get the latest bid and ask price for a specific pair
-    const getLatestPrices = async (symbol) => {
-      const result = await fastify.mysql.query(
-        'SELECT bid, ask FROM fxtrado.ticks WHERE symbol = ? ORDER BY Date DESC LIMIT 1',
-        [symbol]
+    const getAllLatestPrices = async () => {
+      // Fetch the latest bid and ask for all pairs in a single query
+      const [result] = await fastify.mysql.query(
+        `SELECT symbol, bid, ask 
+         FROM fxtrado.ticks 
+         WHERE symbol IN (?) 
+         AND Date = (SELECT MAX(Date) FROM fxtrado.ticks WHERE symbol = fxtrado.ticks.symbol)`,
+        [forexPairs.map(pair => pair.currency_pair)]
       );
-
-      return result[0]; // Return the latest tick
+    
+      return result; // Return all the latest prices
     };
+    
 
     // Periodically fetch and send the latest bid/ask prices to the client
     const interval = setInterval(async () => {
-      for (const pair of forexPairs) {
-        const latestPrices = await getLatestPrices(pair.currency_pair); // Assuming 'symbol' is the column name in forex_pairs
-        
-        if (latestPrices && latestPrices.length > 0) {
-          const latestPrice = latestPrices[0];
-
+      try {
+        const latestPrices = await getAllLatestPrices();
+    
+        // Send all the latest prices to the client
+        for (const latestPrice of latestPrices) {
           socket.send(JSON.stringify({
-            symbol: pair.currency_pair,
+            symbol: latestPrice.symbol,
             bid: latestPrice.bid,
             ask: latestPrice.ask,
           }));
         }
+      } catch (err) {
+        console.error('Error fetching prices:', err);
       }
     }, 1000); // Fetch every 1 second
 
@@ -159,6 +239,55 @@ fastify.register(async function (fastify) {
     });
   });
 });
+
+const openOrderSchema = {
+  body: {
+    type: 'object',
+    required: ['symbol', 'price', 'type'], // Fields required in the request body
+    properties: {
+      user_id: { type: 'string' },
+      symbol: { type: 'string' },
+      price: { type: 'number' },
+      type: { type: 'string', enum: ['buy', 'sell'] }, // You can validate the action as 'buy' or 'sell'
+      volumn: { type: 'number' }
+    }
+  }
+};
+
+fastify.post('/api/openOrders', { schema: openOrderSchema }, async (request, reply) => {
+  const { user_id, symbol, price, type, volumn, status } = request.body;
+  const currentDate = new Date(); 
+  const open_time = formatDate(currentDate);
+  
+
+  try {
+    // Example: Insert the order data into your database (MySQL, PostgreSQL, etc.)
+    const result = await fastify.mysql.query(
+      'INSERT INTO orders (user_id, symbol, price, type, volumn, open_time, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [user_id, symbol, price, type, volumn, open_time, status]
+    );
+
+    // Reply with success response
+    reply.code(201).send({
+      message: 'Order successfully placed',
+      orderId: result.insertId, // You can return the inserted order ID
+    });
+  } catch (err) {
+    // Handle errors (e.g., database connection issues, validation issues, etc.)
+    fastify.log.error(err);
+    reply.code(500).send({ message: 'Failed to place order', error: err.message });
+  }
+});
+
+const formatDate = (date) => {
+  return date.getUTCFullYear() + '-' +
+    String(date.getUTCMonth() + 1).padStart(2, '0') + '-' +
+    String(date.getUTCDate()).padStart(2, '0') + ' ' +
+    String(date.getUTCHours()).padStart(2, '0') + ':' +
+    String(date.getUTCMinutes()).padStart(2, '0') + ':' +
+    String(date.getUTCSeconds()).padStart(2, '0') + '.' +
+    String(date.getUTCMilliseconds()).padStart(3, '0');
+};
 
 const start = async () => {
   try {
