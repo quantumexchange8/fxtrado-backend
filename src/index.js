@@ -125,7 +125,7 @@ const fetchExchangeRate = async () => {
   }
 };
 
-setInterval(fetchExchangeRate, 500);
+setInterval(fetchExchangeRate, 1000);
 
 // TEMPORARY OFF FIRST
 // const getLastMinuteCandle = async () => {
@@ -200,7 +200,7 @@ fastify.register(async function (fastify) {
 
     // Fetch forex pairs from the forex_pairs table
     const [forexPairs] = await fastify.mysql.query('SELECT currency_pair, symbol_pair FROM forex_pairs WHERE status = "active"'); // Assuming fastify.db is your database connection
-
+    
     // Function to get the latest bid and ask price for a specific pair
     const getAllLatestPrices = async () => {
       // Fetch the latest bid and ask for all pairs in a single query
@@ -209,7 +209,7 @@ fastify.register(async function (fastify) {
          FROM fxtrado.ticks 
          WHERE symbol IN (?) 
          AND Date = (SELECT MAX(Date) FROM fxtrado.ticks WHERE symbol = fxtrado.ticks.symbol)`,
-        [forexPairs.map(pair => pair.currency_pair)]
+        [forexPairs.map(pair => pair.symbol_pair)]
       );
     
       return result; // Return all the latest prices
