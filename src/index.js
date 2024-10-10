@@ -13,7 +13,7 @@ const fastify = Fastify({
 });
 
 fastify.register(cors, {
-  origin: ['http://127.0.0.1:8000', 'http://127.0.0.1:8010', 'https://fxtrado-backend.currenttech.pro'], // Allow your frontend origins
+  origin: ['http://127.0.0.1:8000', 'http://127.0.0.1:8010', 'https://fxtrado-user.currenttech.pro'], // Allow your frontend origins
   methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allow methods used in your API
   credentials: true, // If your API requires credentials (cookies, HTTP authentication)
 });
