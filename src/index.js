@@ -6,6 +6,7 @@ import axios from 'axios';
 import websocket from '@fastify/websocket';
 import cors from '@fastify/cors';
 import { startVolumeCreation } from './cronJobs.js';
+import { scheduleOpenOrderUpdates } from './orderCalculation.js';
 import Sensible from '@fastify/sensible'
 
 const fastify = Fastify({
@@ -125,6 +126,10 @@ const fetchExchangeRate = async () => {
   }
 };
 
+fastify.register(async function (fastify, opts) {
+  scheduleOpenOrderUpdates(fastify);
+});
+
 setInterval(fetchExchangeRate, 1000);
 
 // TEMPORARY OFF FIRST
@@ -240,6 +245,31 @@ fastify.register(async function (fastify) {
       clearInterval(interval); // Clear interval when the client disconnects
     });
   });
+
+  fastify.get('/getOrder', {websocket: true}, async (socket, req ) => {
+    console.log('Client connected!');
+
+    const [pOrders] = await fastify.mysql.query('SELECT * FROM orders WHERE status != "closed"');
+    
+    const interval = setInterval(async () => {
+      try {
+        socket.send(JSON.stringify({
+          orders: pOrders,
+        }));
+      } catch (err) {
+        console.error('Error fetching prices:', err);
+      }
+    }, 1000);
+
+    socket.on('close', () => {
+      console.log('Client disconnected');
+      clearInterval(interval); // Clear interval when the client disconnects
+    });
+  });
+
+
+
+
 });
 
 const openOrderSchema = {
@@ -260,26 +290,54 @@ fastify.post('/api/openOrders', { schema: openOrderSchema }, async (request, rep
   const { user_id, symbol, price, type, volume, status } = request.body;
   const currentDate = new Date(); 
   const open_time = formatDate(currentDate);
-  
+
+  const connection = await fastify.mysql.getConnection(); // Get a single connection
 
   try {
-    // Example: Insert the order data into your database (MySQL, PostgreSQL, etc.)
-    const result = await fastify.mysql.query(
-      'INSERT INTO orders (user_id, symbol, price, type, volume, open_time, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [user_id, symbol, price, type, volume, open_time, status]
+    // Begin transaction
+    await connection.beginTransaction();
+
+    // Step 1: Fetch the current running number with a FOR UPDATE lock
+    const [orderRunningNum] = await connection.query('SELECT last_number, digits FROM running_numbers WHERE type = "order_opened" FOR UPDATE');
+    
+    let currentRunningNumber = parseInt(orderRunningNum[0].last_number);
+    let rNumDigit = orderRunningNum[0].digits;
+    const newRunningNumber = currentRunningNumber + 1;
+
+    // Step 2: Generate the order_id with leading zeros based on the digits
+    const order_id = String(newRunningNumber).padStart(rNumDigit, '0');
+
+    // Step 3: Insert the order into the orders table
+    const result = await connection.query(
+      'INSERT INTO orders (user_id, symbol, price, type, volume, open_time, status, order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [user_id, symbol, price, type, volume, open_time, status, order_id]
     );
 
-    // Reply with success response
+    // Step 4: Update the running number in the running_numbers table
+    await connection.query('UPDATE running_numbers SET last_number = ? WHERE type = "order_opened"', [newRunningNumber]);
+
+    // Commit the transaction
+    await connection.commit();
+
+    // Step 5: Send the response back to the client
     reply.code(201).send({
       message: 'Order successfully placed',
-      orderId: result.insertId, // You can return the inserted order ID
+      orderId: result[0].insertId, // You can return the inserted order ID
+      orderNumber: order_id // Return the generated order ID as well
     });
   } catch (err) {
-    // Handle errors (e.g., database connection issues, validation issues, etc.)
+    // Rollback the transaction in case of an error
+    await connection.rollback();
+
+    // Log the error and send an error response
     fastify.log.error(err);
     reply.code(500).send({ message: 'Failed to place order', error: err.message });
+  } finally {
+    // Release the connection regardless of success or failure
+    connection.release();
   }
 });
+
 
 const formatDate = (date) => {
   return date.getUTCFullYear() + '-' +
