@@ -61,30 +61,37 @@ const calculatePL = async (fastify) => {
             const openPriceFloat = parseFloat(price);
             const lotSizeFloat = parseFloat(volume) || 0.01;  // Default to 1 if no lot size provided
             let pl = 0;
+            const contractSize = 100000;
 
             // Calculate P/L based on order type (buy or sell)
             if (type === 'buy') {
-                pl = (currentBid - openPriceFloat) * lotSizeFloat;
+                const pipDifference = currentBid - openPriceFloat; // P/L in terms of price difference
+                pl = pipDifference * lotSizeFloat * contractSize;  // Multiply by lot size and contract size
             } else if (type === 'sell') {
-                pl = (openPriceFloat - currentAsk) * lotSizeFloat;
+                const pipDifference = openPriceFloat - currentAsk; // For sell, reverse the calculation
+                pl = pipDifference * lotSizeFloat * contractSize;
             }
+            
+            // console.log('P/L:', pl);
 
             return {
                 ...order,
                 profit: pl.toFixed(2),  // Return profit rounded to 2 decimal places
+                market_bid: currentBid,  
+                market_ask: currentAsk,  
             };
         });
 
         for (const order of updatedOrders) {
             // console.log(order)
-            const { id, profit } = order;
+            const { id, profit, market_bid, market_ask } = order;
 
-            // console.log('id:', id, 'profit:', profit)
+            // console.log('market_bid:', market_bid, 'market_ask:', market_ask)
 
             // Update the order's profit in the database
             await fastify.mysql.query(
-                'UPDATE orders SET profit = ? WHERE id = ?',
-                [profit, id]
+                'UPDATE orders SET profit = ?, market_bid = ?, market_ask = ? WHERE id = ?',
+                [profit, market_bid, market_ask, id]
             );
         }
 

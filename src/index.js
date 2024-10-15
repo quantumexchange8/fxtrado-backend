@@ -7,6 +7,7 @@ import websocket from '@fastify/websocket';
 import cors from '@fastify/cors';
 import { startVolumeCreation } from './cronJobs.js';
 import { scheduleOpenOrderUpdates } from './orderCalculation.js';
+import { FloatingPLOrder } from './checkFloatingProfit.js';
 import Sensible from '@fastify/sensible'
 
 const fastify = Fastify({
@@ -128,6 +129,7 @@ const fetchExchangeRate = async () => {
 
 fastify.register(async function (fastify, opts) {
   scheduleOpenOrderUpdates(fastify);
+  FloatingPLOrder(fastify);
 });
 
 setInterval(fetchExchangeRate, 1000);
@@ -198,7 +200,6 @@ setInterval(fetchExchangeRate, 1000);
 
 // setInterval(getLastMinuteCandle, 60000);
 
-
 fastify.register(async function (fastify) {
   fastify.get('/forex_pair', { websocket: true }, async (socket /* WebSocket */, req /* FastifyRequest */) => {
     console.log('Client connected!');
@@ -248,10 +249,11 @@ fastify.register(async function (fastify) {
 
   fastify.get('/getOrder', {websocket: true}, async (socket, req ) => {
     console.log('Client connected!');
-
-    const [pOrders] = await fastify.mysql.query('SELECT * FROM orders WHERE status != "closed"');
     
     const interval = setInterval(async () => {
+
+      const [pOrders] = await fastify.mysql.query('SELECT * FROM orders WHERE status != "closed"');
+
       try {
         socket.send(JSON.stringify({
           orders: pOrders,
@@ -267,7 +269,14 @@ fastify.register(async function (fastify) {
     });
   });
 
-
+  fastify.get('/floating-profit', { websocket: true }, (connection, req) => {
+    console.log('Client connected');
+    
+    socket.on('close', () => {
+      console.log('Client disconnected');
+      clearInterval(interval); // Clear interval when the client disconnects
+    });
+  });
 
 
 });
@@ -282,6 +291,20 @@ const openOrderSchema = {
       price: { type: 'number' },
       type: { type: 'string', enum: ['buy', 'sell'] }, // You can validate the action as 'buy' or 'sell'
       volume: { type: 'number' }
+    }
+  }
+};
+
+const closeOrderSchema = {
+  body: {
+    type: 'object',
+    required: ['symbol', 'price', 'type', 'orderId', 'userId'],
+    properties: {
+      symbol: { type: 'string' },
+      price: { type: 'number' },
+      type: { type: 'string' },
+      orderId: { type: 'string' }, 
+      userId: { type: 'string' }
     }
   }
 };
@@ -335,6 +358,43 @@ fastify.post('/api/openOrders', { schema: openOrderSchema }, async (request, rep
   } finally {
     // Release the connection regardless of success or failure
     connection.release();
+  }
+});
+
+fastify.post('/api/closeOrder', { schema: closeOrderSchema }, async (request, reply) => {
+  const { userId, orderId, symbol, price, type } = request.body;
+  
+  const currentDate = new Date(); 
+  const close_time = formatDate(currentDate);  // or use your custom formatDate function
+  const status = 'closed';  // We will set the status to 'closed'
+
+  try {
+    // Get a connection from the MySQL pool
+    const connection = await fastify.mysql.getConnection();
+
+    // Step 1: Check if the order exists
+    const [order] = await connection.query('SELECT * FROM orders WHERE order_id = ? AND user_id = ?', [orderId, userId]);
+    
+    if (order.length === 0) {
+      // If no order is found, return an error
+      reply.status(404).send({ error: 'Order not found' });
+      return;
+    }
+
+    // Step 2: Update the order's status to 'closed'
+    await connection.query(
+      'UPDATE orders SET status = ?, close_price = ?, close_time = ?, profit = ? WHERE order_id = ? AND user_id = ?',
+      [status, price, close_time, price, orderId, userId]
+    );
+
+    // Release the connection
+    connection.release();
+
+    // Step 3: Return a success message
+    reply.send({ success: true, message: 'Order closed successfully' });
+  } catch (error) {
+    console.error('Error closing order:', error);
+    reply.status(500).send({ error: 'An error occurred while closing the order' });
   }
 });
 
