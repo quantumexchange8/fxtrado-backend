@@ -26,7 +26,7 @@ const getOpenOrders = async (fastify) => {
     
 // Function to get the latest bid and ask prices
 const getAllLatestPrices = async (fastify) => {
-  const [forexPairs] = await fastify.mysql.query('SELECT currency_pair, symbol_pair FROM forex_pairs WHERE status = "active"');
+  const [forexPairs] = await fastify.mysql.query('SELECT currency_pair, symbol_pair, digits FROM forex_pairs WHERE status = "active"');
   
   const [result] = await fastify.mysql.query(
     `SELECT symbol, bid, ask 
@@ -35,7 +35,13 @@ const getAllLatestPrices = async (fastify) => {
      AND Date = (SELECT MAX(Date) FROM fxtrado.ticks WHERE symbol = fxtrado.ticks.symbol)`,
     [forexPairs.map(pair => pair.symbol_pair)]
   );
-  return result; // Return all the latest prices
+  return result.map(price => {
+    const pair = forexPairs.find(pair => pair.symbol_pair === price.symbol);
+    return {
+      ...price,
+      digits: pair ? pair.digits : null  // Attach the digits from forexPairs
+    };
+  });
 };
 
 const calculatePL = async (fastify) => {
@@ -60,19 +66,28 @@ const calculatePL = async (fastify) => {
             const currentAsk = parseFloat(latestPrice.ask);
             const openPriceFloat = parseFloat(price);
             const lotSizeFloat = parseFloat(volume) || 0.01;  // Default to 1 if no lot size provided
+            const digits = latestPrice.digits;
+            let multiplier;
+
+            if (digits === 3) {
+                multiplier = 1000;
+            } else if (digits === 5) {
+                multiplier = 100000;
+            } else {
+                multiplier = 1; // Default value if digits are neither 3 nor 5
+            }
+
+            // console.log('digits', digits)
             let pl = 0;
-            const contractSize = 100000;
 
             // Calculate P/L based on order type (buy or sell)
             if (type === 'buy') {
                 const pipDifference = currentBid - openPriceFloat; // P/L in terms of price difference
-                pl = pipDifference * lotSizeFloat * contractSize;  // Multiply by lot size and contract size
+                pl = pipDifference * lotSizeFloat * multiplier;  // Multiply by lot size and contract size
             } else if (type === 'sell') {
                 const pipDifference = openPriceFloat - currentAsk; // For sell, reverse the calculation
-                pl = pipDifference * lotSizeFloat * contractSize;
+                pl = pipDifference * lotSizeFloat * multiplier;
             }
-            
-            // console.log('P/L:', pl);
 
             return {
                 ...order,
