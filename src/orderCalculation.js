@@ -45,78 +45,75 @@ const getAllLatestPrices = async (fastify) => {
 };
 
 const calculatePL = async (fastify) => {
-    try {
-        const orders = await getOpenOrders(fastify);  // Fetch open orders from DB
-        const latestPrices = await getAllLatestPrices(fastify);  // Fetch latest bid/ask prices
-        
-        // Calculate P/L for each order
-        const updatedOrders = orders.map(order => {
-            const latestPrice = latestPrices.find(price => price.symbol === order.symbol);
+  try {
+      // Run queries in parallel since they don't depend on each other
+      const [orders, latestPrices] = await Promise.all([
+          getOpenOrders(fastify),  // Fetch open orders
+          getAllLatestPrices(fastify)  // Fetch latest bid/ask prices
+      ]);
 
-            if (!latestPrice) {
-                console.error(`No latest price found for symbol: ${order.symbol}`);
-                return order;  // If no price found, return order unchanged
-            }
+      // Prepare the updates for batch query
+      const updates = orders.map(order => {
+          const latestPrice = latestPrices.find(price => price.symbol === order.symbol);
 
-            // console.log('test', order)
+          if (!latestPrice) {
+              console.error(`No latest price found for symbol: ${order.symbol}`);
+              return null; // Skip this order if no latest price is found
+          }
 
-            // Extract relevant data
-            const { type, price, volume } = order;
-            const currentBid = parseFloat(latestPrice.bid);
-            const currentAsk = parseFloat(latestPrice.ask);
-            const openPriceFloat = parseFloat(price);
-            const lotSizeFloat = parseFloat(volume) || 0.01;  // Default to 1 if no lot size provided
-            const digits = latestPrice.digits;
-            let multiplier;
+          const { type, price, volume } = order;
+          const currentBid = parseFloat(latestPrice.bid);
+          const currentAsk = parseFloat(latestPrice.ask);
+          const openPriceFloat = parseFloat(price);
+          const lotSizeFloat = parseFloat(volume) || 0.01;
+          const digits = latestPrice.digits;
+          const multiplier = digits === 3 ? 1000 : digits === 5 ? 100000 : digits === 1 ? 10 : 1;
 
-            if (digits === 3) {
-                multiplier = 1000;
-            } else if (digits === 5) {
-                multiplier = 100000;
-            } else {
-                multiplier = 1; // Default value if digits are neither 3 nor 5
-            }
+          let pl = 0;
+          if (type === 'buy') {
+              const pipDifference = currentBid - openPriceFloat;
+              pl = pipDifference * lotSizeFloat * multiplier;
+          } else if (type === 'sell') {
+              const pipDifference = openPriceFloat - currentAsk;
+              pl = pipDifference * lotSizeFloat * multiplier;
+          }
 
-            // console.log('digits', digits)
-            let pl = 0;
+          return {
+              id: order.id,
+              profit: pl.toFixed(2),  // Format profit
+              market_bid: currentBid,
+              market_ask: currentAsk
+          };
+      }).filter(update => update !== null);  // Filter out null updates
 
-            // Calculate P/L based on order type (buy or sell)
-            if (type === 'buy') {
-                const pipDifference = currentBid - openPriceFloat; // P/L in terms of price difference
-                pl = pipDifference * lotSizeFloat * multiplier;  // Multiply by lot size and contract size
-            } else if (type === 'sell') {
-                const pipDifference = openPriceFloat - currentAsk; // For sell, reverse the calculation
-                pl = pipDifference * lotSizeFloat * multiplier;
-            }
+      if (updates.length === 0) return [];  // No updates, return early
 
-            return {
-                ...order,
-                profit: pl.toFixed(2),  // Return profit rounded to 2 decimal places
-                market_bid: currentBid,  
-                market_ask: currentAsk,  
-            };
-        });
+      // Construct the batch update query
+      const updateQuery = `
+          UPDATE orders
+          SET profit = CASE id
+              ${updates.map(u => `WHEN ${u.id} THEN ${u.profit}`).join(' ')}
+          END,
+          market_bid = CASE id
+              ${updates.map(u => `WHEN ${u.id} THEN ${u.market_bid}`).join(' ')}
+          END,
+          market_ask = CASE id
+              ${updates.map(u => `WHEN ${u.id} THEN ${u.market_ask}`).join(' ')}
+          END
+          WHERE id IN (${updates.map(u => u.id).join(', ')});
+      `;
 
-        for (const order of updatedOrders) {
-            // console.log(order)
-            const { id, profit, market_bid, market_ask } = order;
+      // Execute the batch update query
+      await fastify.mysql.query(updateQuery);
 
-            // console.log('market_bid:', market_bid, 'market_ask:', market_ask)
+      return updates;  // Return the updated orders
 
-            // Update the order's profit in the database
-            await fastify.mysql.query(
-                'UPDATE orders SET profit = ?, market_bid = ?, market_ask = ? WHERE id = ?',
-                [profit, market_bid, market_ask, id]
-            );
-        }
-
-        return updatedOrders;  // Return the updated orders
-
-    } catch (error) {
-        console.error('Error calculating P/L:', error);
-        return [];
-    }
+  } catch (error) {
+      console.error('Error calculating P/L:', error);
+      return [];
+  }
 }
+
 
 
 // Schedule the cron job to run every minute
