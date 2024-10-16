@@ -226,19 +226,25 @@ fastify.register(async function (fastify) {
     const interval = setInterval(async () => {
       try {
         const latestPrices = await getAllLatestPrices();
+        
+        if (latestPrices.length === 0) {
+          console.log('No latest prices fetched.');
+        }
     
         // Send all the latest prices to the client
         for (const latestPrice of latestPrices) {
-          socket.send(JSON.stringify({
+          const message = JSON.stringify({
             symbol: latestPrice.symbol,
             bid: latestPrice.bid,
             ask: latestPrice.ask,
-          }));
+          });
+          
+          socket.send(message);
         }
       } catch (err) {
         console.error('Error fetching prices:', err);
       }
-    }, 1000); // Fetch every 1 second
+    }, 500);
 
     // Handle client disconnect
     socket.on('close', () => {
@@ -247,25 +253,41 @@ fastify.register(async function (fastify) {
     });
   });
 
-  fastify.get('/getOrder', {websocket: true}, async (socket, req ) => {
+  fastify.get('/getOrder', { websocket: true }, async (socket, req) => {
     console.log('Client connected!');
     
-    const interval = setInterval(async () => {
+    let lastSentOrders = []; // Cache to keep track of the last sent orders
+    let interval;
 
-      const [pOrders] = await fastify.mysql.query('SELECT * FROM orders WHERE status != "closed"');
+    const fetchAndSendOrders = async () => {
+        try {
+            // Fetch orders from the database
+            const [pOrders] = await fastify.mysql.query('SELECT * FROM orders WHERE status != "closed"');
 
-      try {
-        socket.send(JSON.stringify({
-          orders: pOrders,
-        }));
-      } catch (err) {
-        console.error('Error fetching prices:', err);
-      }
-    }, 1000);
+            // Convert to string and compare with last sent orders to avoid redundant sends
+            const ordersStr = JSON.stringify(pOrders);
+
+            if (ordersStr !== JSON.stringify(lastSentOrders)) {
+                // Send orders only if they have changed
+                socket.send(ordersStr);
+                lastSentOrders = pOrders; // Update the cache
+            }
+        } catch (err) {
+            console.error('Error fetching orders:', err);
+        }
+    };
+
+    // Periodically fetch and send orders
+    interval = setInterval(fetchAndSendOrders, 3000); // Query every 3 seconds (adjust as needed)
 
     socket.on('close', () => {
-      console.log('Client disconnected');
-      clearInterval(interval); // Clear interval when the client disconnects
+        console.log('Client disconnected');
+        clearInterval(interval); // Clear interval when the client disconnects
+    });
+
+    socket.on('error', (err) => {
+        console.error('WebSocket error:', err);
+        clearInterval(interval); // Clear interval on error to avoid memory leaks
     });
   });
 
@@ -304,7 +326,8 @@ const closeOrderSchema = {
       price: { type: 'number' },
       type: { type: 'string' },
       orderId: { type: 'string' }, 
-      userId: { type: 'string' }
+      userId: { type: 'string' },
+      marketPrice: { type: 'number' }
     }
   }
 };
@@ -362,7 +385,7 @@ fastify.post('/api/openOrders', { schema: openOrderSchema }, async (request, rep
 });
 
 fastify.post('/api/closeOrder', { schema: closeOrderSchema }, async (request, reply) => {
-  const { userId, orderId, symbol, price, type } = request.body;
+  const { userId, orderId, symbol, price, type, marketPrice } = request.body;
   
   const currentDate = new Date(); 
   const close_time = formatDate(currentDate);  // or use your custom formatDate function
@@ -374,6 +397,11 @@ fastify.post('/api/closeOrder', { schema: closeOrderSchema }, async (request, re
 
     // Step 1: Check if the order exists
     const [order] = await connection.query('SELECT * FROM orders WHERE order_id = ? AND user_id = ?', [orderId, userId]);
+
+    const [user_wallet] = await connection.query('SELECT * FROM wallets WHERE user_id = ?', [userId]);
+    const currentBalance = parseFloat(user_wallet[0].balance);
+    
+    const newBalance = currentBalance + price;
     
     if (order.length === 0) {
       // If no order is found, return an error
@@ -384,14 +412,22 @@ fastify.post('/api/closeOrder', { schema: closeOrderSchema }, async (request, re
     // Step 2: Update the order's status to 'closed'
     await connection.query(
       'UPDATE orders SET status = ?, close_price = ?, close_time = ?, profit = ? WHERE order_id = ? AND user_id = ?',
-      [status, price, close_time, price, orderId, userId]
+      [status, marketPrice, close_time, price, orderId, userId]
+    );
+
+    await connection.query(
+      'UPDATE wallets SET balance = ? WHERE user_id = ?',
+      [newBalance, userId]
     );
 
     // Release the connection
     connection.release();
 
     // Step 3: Return a success message
-    reply.send({ success: true, message: 'Order closed successfully' });
+    reply.code(200).send({
+      message: 'Order successfully closed',
+      newBalance: newBalance, // Return the new wallet balance
+    });
   } catch (error) {
     console.error('Error closing order:', error);
     reply.status(500).send({ error: 'An error occurred while closing the order' });

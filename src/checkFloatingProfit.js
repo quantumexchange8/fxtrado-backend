@@ -77,7 +77,6 @@ const checkUserOrders = async (fastify) => {
         // If total floating profit is less than negative wallet balance, close all orders
         if (totalFloatingProfit < -user.wallet_balance) {
 
-            console.log('total', totalFloatingProfit);
           await closeOrdersForUser(user.id);
         }
       }
