@@ -24,6 +24,7 @@ fastify.register(cors, {
 fastify.register(websocket, {
   options: { maxPayload: 1048576 }
 });
+const connectedClients = new Set();
 
 // API
 const OANDA_API_KEY = 'cade200b33a840342cb1f08a79e2c5cd-ed020510413913fe81d60579a39711de'; 
@@ -202,56 +203,78 @@ setInterval(fetchExchangeRate, 1000);
 
 // setInterval(getLastMinuteCandle, 60000);
 
+const userConnections = new Map();
 fastify.register(async function (fastify) {
 
-  fastify.get('/getOrder', { websocket: true }, async (socket, req) => {
+  fastify.get('/getOrder', { websocket: true }, async (connection, req) => {
     console.log('Client connected!');
-    
-    let lastSentOrders = []; // Cache to keep track of the last sent orders
-    let interval;
 
-    const fetchAndSendOrders = async () => {
-        try {
-            // Fetch orders from the database
-            const [pOrders] = await fastify.mysql.query('SELECT * FROM orders WHERE status != "closed"');
+    // Listen for the initial message from the client to get the user ID
+    connection.once('message', async (message) => {
+      try {
+        const data = JSON.parse(message);
+        const userId = data.userId; // Assume user ID is sent from the frontend upon connection
+        // console.log('Received user ID:', userId);
 
-            // Convert to string and compare with last sent orders to avoid redundant sends
-            const ordersStr = JSON.stringify(pOrders);
+        // If we have a valid userId, fetch and send orders for this user
+        if (userId) {
+          // Add the connection to the userConnections map
+          userConnections.set(userId, connection);
 
-            if (ordersStr !== JSON.stringify(lastSentOrders)) {
-                // Send orders only if they have changed
-                socket.send(ordersStr);
-                lastSentOrders = pOrders; // Update the cache
+          const fetchAndSendOrders = async () => {
+            try {
+              const [pOrders] = await fastify.mysql.query(
+                'SELECT * FROM orders WHERE user_id = ? AND status != "closed"', 
+                [userId]
+              );
+              
+              // Send the fetched orders to the user
+              if (connection.readyState === connection.OPEN) {
+                connection.send(JSON.stringify({ pOrders: pOrders }));
+              }
+            } catch (err) {
+              console.error('Error fetching orders:', err);
             }
-        } catch (err) {
-            console.error('Error fetching orders:', err);
+          };
+
+          // Fetch and send the orders once upon connection
+          await fetchAndSendOrders();
+
+          // Periodically fetch and send updated orders
+          const interval = setInterval(async () => {
+            await fetchAndSendOrders(); // Send updated orders every second
+          }, 1000);
+
+          // Handle connection close
+          connection.on('close', () => {
+            console.log(`User ${userId} disconnected`);
+            clearInterval(interval); // Stop fetching orders when the client disconnects
+            userConnections.delete(userId); // Remove the client from the set
+          });
+
+          // Handle WebSocket errors
+          connection.on('error', (err) => {
+            console.error('WebSocket error:', err);
+            clearInterval(interval); // Stop fetching orders if there's an error
+            userConnections.delete(userId);
+          });
+        } else {
+          connection.send(JSON.stringify({ error: 'Invalid user ID' }));
         }
-    };
-
-    // Periodically fetch and send orders
-    interval = setInterval(fetchAndSendOrders, 1000); // Query every 3 seconds (adjust as needed)
-
-    socket.on('close', () => {
-        console.log('Client disconnected');
-        clearInterval(interval); // Clear interval when the client disconnects
-    });
-
-    socket.on('error', (err) => {
-        console.error('WebSocket error:', err);
-        clearInterval(interval); // Clear interval on error to avoid memory leaks
+      } catch (err) {
+        console.error('Error parsing message:', err);
+      }
     });
   });
 
-  fastify.get('/floating-profit', { websocket: true }, (connection, req) => {
-    console.log('Client connected');
+  // fastify.get('/floating-profit', { websocket: true }, (connection, req) => {
+  //   console.log('Client connected');
     
-    socket.on('close', () => {
-      console.log('Client disconnected');
-      clearInterval(interval); // Clear interval when the client disconnects
-    });
-  });
-
-
+  //   socket.on('close', () => {
+  //     console.log('Client disconnected');
+  //     clearInterval(interval); // Clear interval when the client disconnects
+  //   });
+  // });
 });
 
 const getActiveForexPairs = async () => {
@@ -271,7 +294,7 @@ const getAllLatestPrices = async (forexPairs) => {
   return result;
 };
 
-const connectedClients = new Set();
+
 fastify.register(async function (fastify) {
 
   fastify.get('/forex_pair', { websocket: true }, async (connection, req) => {

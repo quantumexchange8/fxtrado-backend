@@ -57,27 +57,32 @@ const checkUserOrders = async (fastify) => {
     // console.log('test')
     try {
       const [users] = await fastify.mysql.query('SELECT * FROM users');
-     const latestPrices = await getAllLatestPrices(fastify);  // Fetch live prices for symbols
     
       for (const user of users) {
+        // Fetch all open orders for this user
         const [orders] = await fastify.mysql.query('SELECT * FROM orders WHERE user_id = ? AND status = "open"', [user.id]);
-        
-        let totalFloatingProfit = 0;
+  
+        // Sum the negative profit values
+        let totalNegativeProfit = 0;
         for (const order of orders) {
-            
-          const currentPrice = latestPrices.find(price => price.symbol === order.symbol);;  // Get live price for the order's symbol
-        
-          const floatingProfit = calculateFloatingProfit(order, currentPrice);
-          totalFloatingProfit += floatingProfit;
-
+          // Parse the profit to a number, and handle null or invalid profit values
+          const profit = order.profit !== null && !isNaN(order.profit) ? parseFloat(order.profit) : 0; 
+  
+          if (profit < 0) {
+            totalNegativeProfit += profit; // Add only negative profits (which are now numbers)
+          }
         }
 
-        // console.log('total floating', totalFloatingProfit);
-  
-        // If total floating profit is less than negative wallet balance, close all orders
-        if (totalFloatingProfit < -user.wallet_balance) {
+        // Fetch user's wallet balance
+        const [wallets] = await fastify.mysql.query('SELECT * FROM wallets WHERE user_id = ?', [user.id]);
+        const wallet = wallets[0]; // Assuming each user has one wallet
 
-          await closeOrdersForUser(user.id);
+        // If total negative profit exceeds the user's wallet balance, close the orders
+        if (Math.abs(totalNegativeProfit) > wallet.balance) {
+          console.log(`User ${user.id} has exceeded their wallet balance. Closing orders...`);
+  
+          // Update the status of all this user's orders to 'closed'
+          await fastify.mysql.query('UPDATE orders SET status = "closed" WHERE user_id = ? AND status = "open"', [user.id]);
         }
       }
     } catch (error) {
