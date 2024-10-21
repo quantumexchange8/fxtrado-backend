@@ -203,64 +203,56 @@ setInterval(fetchExchangeRate, 1000);
 
 // setInterval(getLastMinuteCandle, 60000);
 
-const userConnections = new Map();
+const userConnections = new Set();
 fastify.register(async function (fastify) {
 
   fastify.get('/getOrder', { websocket: true }, async (connection, req) => {
     console.log('Client connected!');
 
-    // Listen for the initial message from the client to get the user ID
     connection.once('message', async (message) => {
       try {
         const data = JSON.parse(message);
         const userId = data.userId; // Assume user ID is sent from the frontend upon connection
-        // console.log('Received user ID:', userId);
 
-        // If we have a valid userId, fetch and send orders for this user
-        if (userId) {
           // Add the connection to the userConnections map
-          userConnections.set(userId, connection);
+          userConnections.add(connection);
+
+          let lastFetched = 0; // Track last fetch time to avoid spamming queries
+          const fetchDelay = 500; // 5 seconds delay after reconnection
 
           const fetchAndSendOrders = async () => {
-            try {
-              const [pOrders] = await fastify.mysql.query(
-                'SELECT * FROM orders WHERE user_id = ? AND status != "closed"', 
-                [userId]
-              );
-              
-              // Send the fetched orders to the user
-              if (connection.readyState === connection.OPEN) {
-                connection.send(JSON.stringify({ pOrders: pOrders }));
+            
+            const [pOrders] = await fastify.mysql.query('SELECT * FROM orders WHERE status = "open"');
+
+            userConnections.forEach(client => {
+              if (client.readyState === client.OPEN) {
+                client.send(JSON.stringify({ pOrders: pOrders }));
               }
-            } catch (err) {
-              console.error('Error fetching orders:', err);
-            }
+            })
           };
 
           // Fetch and send the orders once upon connection
           await fetchAndSendOrders();
 
-          // Periodically fetch and send updated orders
+          // Periodically fetch and send updated orders, but throttle the frequency
           const interval = setInterval(async () => {
-            await fetchAndSendOrders(); // Send updated orders every second
+            await fetchAndSendOrders(); // Fetch and send updated orders with throttling
           }, 1000);
 
           // Handle connection close
           connection.on('close', () => {
-            console.log(`User ${userId} disconnected`);
             clearInterval(interval); // Stop fetching orders when the client disconnects
-            userConnections.delete(userId); // Remove the client from the set
+            userConnections.delete(connection); // Remove the client from the set
           });
 
           // Handle WebSocket errors
           connection.on('error', (err) => {
             console.error('WebSocket error:', err);
             clearInterval(interval); // Stop fetching orders if there's an error
-            userConnections.delete(userId);
+            userConnections.delete(connection);
           });
-        } else {
-          connection.send(JSON.stringify({ error: 'Invalid user ID' }));
-        }
+
+        
       } catch (err) {
         console.error('Error parsing message:', err);
       }

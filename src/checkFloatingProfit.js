@@ -83,6 +83,7 @@ const checkUserOrders = async (fastify) => {
   
           // Update the status of all this user's orders to 'closed'
           await fastify.mysql.query('UPDATE orders SET status = "closed" WHERE user_id = ? AND status = "open"', [user.id]);
+          await fastify.mysql.query('UPDATE wallets SET balance = "0.00" WHERE user_id = ? ', [user.id]);
         }
       }
     } catch (error) {

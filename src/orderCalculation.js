@@ -19,7 +19,7 @@ export const updateOpenOrders = async (fastify) => {
 
 // Function to get open orders
 const getOpenOrders = async (fastify) => {
-  const [orders] = await fastify.mysql.query('SELECT * FROM orders WHERE status = "open"');
+  const [orders] = await fastify.mysql.query('SELECT * FROM orders WHERE status = "open" AND close_price is NULL');
 
   return orders;
 };
@@ -46,75 +46,78 @@ const getAllLatestPrices = async (fastify) => {
 
 const calculatePL = async (fastify) => {
   try {
-      // Run queries in parallel since they don't depend on each other
-      const [orders, latestPrices] = await Promise.all([
-          getOpenOrders(fastify),  // Fetch open orders
-          getAllLatestPrices(fastify)  // Fetch latest bid/ask prices
-      ]);
+    // Fetch open orders and latest prices in parallel
+    const [orders, latestPrices] = await Promise.all([getOpenOrders(fastify), getAllLatestPrices(fastify)]);
 
-      // Prepare the updates for batch query
-      const updates = orders.map(order => {
-          const latestPrice = latestPrices.find(price => price.symbol === order.symbol);
+    if (orders.length === 0 || latestPrices.length === 0) return []; // No data to process
 
-          if (!latestPrice) {
-              console.error(`No latest price found for symbol: ${order.symbol}`);
-              return null; // Skip this order if no latest price is found
-          }
+    // Create a map for fast lookups of latest prices by symbol
+    const latestPriceMap = new Map(latestPrices.map(price => [price.symbol, price]));
 
-          const { type, price, volume } = order;
-          const currentBid = parseFloat(latestPrice.bid);
-          const currentAsk = parseFloat(latestPrice.ask);
-          const openPriceFloat = parseFloat(price);
-          const lotSizeFloat = parseFloat(volume) || 0.01;
-          const digits = latestPrice.digits;
-          const multiplier = digits === 3 ? 1000 : digits === 5 ? 100000 : digits === 1 ? 10 : 1;
+    // Utility function to calculate profit
+    const calculateProfit = (order, latestPrice) => {
+      const { type, price, volume } = order;
+      const currentBid = parseFloat(latestPrice.bid);
+      const currentAsk = parseFloat(latestPrice.ask);
+      const openPriceFloat = parseFloat(price);
+      const lotSizeFloat = parseFloat(volume) || 0.01;
+      const digits = latestPrice.digits;
+      const multiplier = digits === 3 ? 1000 : digits === 5 ? 100000 : digits === 1 ? 10 : 1;
 
-          let pl = 0;
-          if (type === 'buy') {
-              const pipDifference = currentBid - openPriceFloat;
-              pl = pipDifference * lotSizeFloat * multiplier;
-          } else if (type === 'sell') {
-              const pipDifference = openPriceFloat - currentAsk;
-              pl = pipDifference * lotSizeFloat * multiplier;
-          }
+      let pipDifference = 0;
+      if (type === 'buy') {
+        pipDifference = currentBid - openPriceFloat;
+      } else if (type === 'sell') {
+        pipDifference = openPriceFloat - currentAsk;
+      }
 
-          return {
-              id: order.id,
-              profit: pl.toFixed(2),  // Format profit
-              market_bid: currentBid,
-              market_ask: currentAsk
-          };
-      }).filter(update => update !== null);  // Filter out null updates
+      return (pipDifference * lotSizeFloat * multiplier).toFixed(2);
+    };
 
-      if (updates.length === 0) return [];  // No updates, return early
+    // Prepare updates
+    const updates = [];
+    for (const order of orders) {
+      const latestPrice = latestPriceMap.get(order.symbol);
+      if (!latestPrice) {
+        console.error(`No latest price found for symbol: ${order.symbol}`);
+        continue; // Skip this order if no price is found
+      }
 
-      // Construct the batch update query
-      const updateQuery = `
-          UPDATE orders
-          SET profit = CASE id
-              ${updates.map(u => `WHEN ${u.id} THEN ${u.profit}`).join(' ')}
-          END,
-          market_bid = CASE id
-              ${updates.map(u => `WHEN ${u.id} THEN ${u.market_bid}`).join(' ')}
-          END,
-          market_ask = CASE id
-              ${updates.map(u => `WHEN ${u.id} THEN ${u.market_ask}`).join(' ')}
-          END
-          WHERE id IN (${updates.map(u => u.id).join(', ')});
-      `;
+      const profit = calculateProfit(order, latestPrice);
+      updates.push({
+        id: order.id,
+        profit,
+        market_bid: parseFloat(latestPrice.bid),
+        market_ask: parseFloat(latestPrice.ask),
+      });
+    }
 
-      // Execute the batch update query
-      await fastify.mysql.query(updateQuery);
+    if (updates.length === 0) return []; // No updates, return early
 
-      return updates;  // Return the updated orders
+    // Prepare query components for batch update
+    const ids = updates.map(u => u.id).join(', ');
+    const profitCases = updates.map(u => `WHEN ${u.id} THEN ${u.profit}`).join(' ');
+    const bidCases = updates.map(u => `WHEN ${u.id} THEN ${u.market_bid}`).join(' ');
+    const askCases = updates.map(u => `WHEN ${u.id} THEN ${u.market_ask}`).join(' ');
 
+    const updateQuery = `
+      UPDATE orders
+      SET
+        profit = CASE id ${profitCases} END,
+        market_bid = CASE id ${bidCases} END,
+        market_ask = CASE id ${askCases} END
+      WHERE id IN (${ids});
+    `;
+
+    // Execute the batch update query
+    await fastify.mysql.query(updateQuery);
+
+    return updates; // Return the updated orders
   } catch (error) {
-      console.error('Error calculating P/L:', error);
-      return [];
+    console.error('Error calculating P/L:', error);
+    return [];
   }
-}
-
-
+};
 
 // Schedule the cron job to run every minute
 export const scheduleOpenOrderUpdates = (fastify) => {
