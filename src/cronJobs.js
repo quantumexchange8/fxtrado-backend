@@ -7,20 +7,19 @@ export const startVolumeCreation = (fastify) => {
       connection = await fastify.mysql.getConnection();
 
       // Fetch all active forex pairs in a single query
-      const [forexPairs] = await connection.query('SELECT currency_pair FROM forex_pairs WHERE status = "active"');
+      const [forexPairs] = await connection.query('SELECT symbol_pair FROM forex_pairs WHERE status = "active"');
 
       // Array to store bulk insert data
       const insertData = [];
 
-      const promises = forexPairs.map(async ({ currency_pair }) => {
+      const promises = forexPairs.map(async ({ symbol_pair }) => {
         try {
           // Fetch OHLC data for the last 1 minute
           const [ohlcData] = await connection.query(`
             SELECT 
               (SELECT Bid FROM ticks 
                WHERE Symbol = ? 
-               AND Date >= DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MINUTE), '%Y-%m-%d %H:%i:00') 
-               AND Date < DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:00') 
+               AND Date BETWEEN DATE_SUB(NOW(), INTERVAL 1 MINUTE) AND NOW()
                ORDER BY Date ASC LIMIT 1) AS open,
       
               MAX(GREATEST(Bid, Ask)) AS high,
@@ -28,15 +27,13 @@ export const startVolumeCreation = (fastify) => {
       
               (SELECT Bid FROM ticks 
                WHERE Symbol = ? 
-               AND Date >= DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MINUTE), '%Y-%m-%d %H:%i:00') 
-               AND Date < DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:00') 
+               AND Date BETWEEN DATE_SUB(NOW(), INTERVAL 1 MINUTE) AND NOW()
                ORDER BY Date DESC LIMIT 1) AS close
       
             FROM ticks
             WHERE Symbol = ? 
-              AND Date >= DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MINUTE), '%Y-%m-%d %H:%i:00')
-              AND Date < DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:00');
-          `, [currency_pair, currency_pair, currency_pair]);
+              AND Date BETWEEN DATE_SUB(NOW(), INTERVAL 1 MINUTE) AND NOW();
+          `, [symbol_pair, symbol_pair, symbol_pair]);
       
           // If data is present, add it to the insert array
           if (ohlcData && ohlcData.length) {
@@ -44,11 +41,13 @@ export const startVolumeCreation = (fastify) => {
             const currentDate = new Date();
             const date = formatDate(currentDate);
       
-            // Prepare data for batch insert
-            insertData.push([date, open, high, low, close, currency_pair]);
+            // Check if all necessary data is present before inserting
+            if (open !== null && high !== null && low !== null && close !== null) {
+              insertData.push([date, open, high, low, close, symbol_pair]);
+            }
           }
         } catch (err) {
-          console.error(`Error processing currency pair ${currency_pair}:`, err);
+          console.error(`Error processing currency pair ${symbol_pair}:`, err);
         }
       });
 
@@ -58,11 +57,13 @@ export const startVolumeCreation = (fastify) => {
       // If there's data to insert, perform bulk insertion
       if (insertData.length > 0) {
         await connection.query(`
-          INSERT INTO history_chart (Date, Open, High, Low, Close, Symbol)
+          INSERT INTO history_charts (Date, Open, High, Low, Close, Symbol)
           VALUES ?
         `, [insertData]);
 
         console.log(`Inserted ${insertData.length} 1-min candlestick records.`);
+      } else {
+        console.log('No new candlestick data to insert.');
       }
 
     } catch (err) {

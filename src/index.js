@@ -8,6 +8,7 @@ import cors from '@fastify/cors';
 import { startVolumeCreation } from './cronJobs.js';
 import { scheduleOpenOrderUpdates } from './orderCalculation.js';
 import { FloatingPLOrder } from './checkFloatingProfit.js';
+import { schedeEveryMinOHLC } from './livePricing.js';
 import Sensible from '@fastify/sensible'
 
 const fastify = Fastify({
@@ -31,7 +32,7 @@ const OANDA_API_KEY = 'cade200b33a840342cb1f08a79e2c5cd-ed020510413913fe81d60579
 const account_id = '101-003-30075838-001';
 const instrument = 'EUR_USD'
 // const OANDA_CANDLES = `https://api-fxpractice.oanda.com/v3/instruments/`;
-const OANDA_PRICE_URL = `https://api-fxpractice.oanda.com/v3/accounts/${account_id}/pricing`
+const OANDA_PRICE_URL = `https://api-fxpractice.oanda.com/v3/accounts/${account_id}/pricing`;
 
 // Database Access
 fastify.register(fastifyMysql, {
@@ -47,12 +48,13 @@ let exchangeRateData = {};
 const fetchSymbols = async (connection) => {
   try {
     // Query to get base and quote from the forex_pairs table
-    const [rows] = await connection.query('SELECT currency_pair, symbol_pair FROM forex_pairs WHERE status = "active"');
-    
+    const [rows] = await connection.query('SELECT currency_pair, symbol_pair, digits FROM forex_pairs WHERE status = "active"');
+
     // Map the result into the symbols array format
     return rows.map(row => ({
       currency_pair: row.currency_pair,
       symbol_pair: row.symbol_pair,
+      digits: row.digits,
     }));
   } catch (error) {
     console.error('Error fetching forex pairs:', error);
@@ -63,24 +65,18 @@ const fetchSymbols = async (connection) => {
 const fetchExchangeRate = async () => {
   let connection;
 
+  const date = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
   try {
     connection = await fastify.mysql.getConnection();
     const symbols = await fetchSymbols(connection);
-
-    const currentDate = new Date();
-    const date = currentDate.getUTCFullYear() + '-' +
-                 String(currentDate.getUTCMonth() + 1).padStart(2, '0') + '-' +
-                 String(currentDate.getUTCDate()).padStart(2, '0') + ' ' +
-                 String(currentDate.getUTCHours()).padStart(2, '0') + ':' +
-                 String(currentDate.getUTCMinutes()).padStart(2, '0') + ':' +
-                 String(currentDate.getUTCSeconds()).padStart(2, '0') + '.' +
-                 String(currentDate.getUTCMilliseconds()).padStart(3, '0');
-
+    
     // Fetch data in parallel using `Promise.all`
     const fetchTasks = symbols.map(async (symbol) => {
       
       const { currency_pair } = symbol;
       const { symbol_pair } = symbol;
+      const { digits } = symbol;
 
       try {
         const response = await axios.get(OANDA_PRICE_URL, {
@@ -103,8 +99,9 @@ const fetchExchangeRate = async () => {
         const instrument = priceData.instrument;
         const remark = 'OANDA';
         const symbolPair = symbol_pair;
+        const digit = digits;
 
-        return [date, symbolPair, bid, ask, remark];
+        return [date, symbolPair, bid, ask, digit, remark];
       } catch (error) {
         console.error(`Failed to fetch data for ${currency_pair}:`, error.message);
         return null; // Return null if the request fails
@@ -116,7 +113,7 @@ const fetchExchangeRate = async () => {
 
     if (results.length > 0) {
       await connection.query(
-        'INSERT INTO ticks (Date, Symbol, Bid, Ask, Remark) VALUES ?',
+        'INSERT INTO ticks (Date, Symbol, Bid, Ask, digits, Remark) VALUES ?',
         [results]
       );
     }
@@ -133,75 +130,12 @@ const fetchExchangeRate = async () => {
 fastify.register(async function (fastify, opts) {
   scheduleOpenOrderUpdates(fastify);
   FloatingPLOrder(fastify);
+  startVolumeCreation(fastify);
+  schedeEveryMinOHLC(fastify);
 });
 
 setInterval(fetchExchangeRate, 1000);
 
-// TEMPORARY OFF FIRST
-// const getLastMinuteCandle = async () => {
-//   let connection;
-
-//   try {
-//     connection = await fastify.mysql.getConnection();
-//     const symbols = await fetchSymbols(connection);
-
-//     const currentDate = new Date();
-//     const date = currentDate.getUTCFullYear() + '-' +
-//                  String(currentDate.getUTCMonth() + 1).padStart(2, '0') + '-' +
-//                  String(currentDate.getUTCDate()).padStart(2, '0') + ' ' +
-//                  String(currentDate.getUTCHours()).padStart(2, '0') + ':' +
-//                  String(currentDate.getUTCMinutes()).padStart(2, '0') + ':' +
-//                  String(currentDate.getUTCSeconds()).padStart(2, '0') + '.' +
-//                  String(currentDate.getUTCMilliseconds()).padStart(3, '0');
-
-//     const fetchTasks = symbols.map(async (symbol) => {
-
-//     const { currency_pair } = symbol;
-
-//     try {
-//       const response = await axios.get(`https://api-fxpractice.oanda.com/v3/instruments/${currency_pair}/candles`, {
-//         headers: { 
-//           'Authorization': `Bearer ${OANDA_API_KEY}`,
-//           'Accept': 'application/json',
-//           'Content-Type': 'application/json',
-//         },
-//         params: {
-//           price: 'M', // Get bid/ask prices
-//           granularity: 'M1', // 1-minute candles
-//           count: 1 // Get the latest candle (set count to 1)
-//         }
-//       });
-
-//       console.log('res', response.data.candles[0])
-//       const instrument = response.data.instrument;
-//       const candle = response.data.candles[0];
-//       const open = candle.mid.o;
-//       const high = candle.mid.h;
-//       const low = candle.mid.l;
-//       const close = candle.mid.c;
-//       const symbolPair = instrument;
-      
-//       return [date, open, high, low, close], symbolPair;
-
-//     } catch (error) {
-//       console.error(`Failed to fetch data for ${currency_pair}:`, error.message);
-//       return null; // Return null if the request fails
-//     }
-//   });
-
-//   if (results.length > 0) {
-//     await connection.query(
-//       'INSERT INTO ticks (Date, Symbol, Bid, Ask, Remark) VALUES ?',
-//       [results]
-//     );
-//   }
-
-//   } catch (error) {
-//     console.error(`Failed to fetch data for ${currency_pair}:`, error.message);
-//   }
-// }
-
-// setInterval(getLastMinuteCandle, 60000);
 
 const userConnections = new Set();
 fastify.register(async function (fastify) {
@@ -340,6 +274,44 @@ fastify.register(async function (fastify) {
     });
   });
 });
+
+// const chartConnections = new Set();
+// fastify.register(async function (fastify) {
+//   fastify.get('/getChartData', { websocket: true }, async (connection, req) => {
+//     console.log('Client connected!');
+//     chartConnections.add(connection);
+
+//     const sendAllOHLC = async () => {
+
+//       const chartData = await fastify.mysql.query(`
+//         SELECT * 
+//         FROM history_charts
+//         WHERE DATE(Date) = CURDATE()
+//       `);
+      
+//       chartConnections.forEach(client => {
+//         if (client.readyState === client.OPEN) {
+//           client.send(JSON.stringify({ chartData }));
+//         }
+//       })
+//     }
+
+//     await sendAllOHLC();
+
+//     const interval = setInterval(sendAllOHLC, 10000);
+
+//     connection.on('close', () => {
+//       clearInterval(interval); // Clear the interval to avoid memory leaks
+//       chartConnections.delete(connection); // Remove the client from the set
+//       console.log('Client disconnected');
+//     });
+
+//     connection.on('error', (error) => {
+//       console.error('WebSocket error:', error);
+//       chartConnections.delete(connection);
+//     });
+//   });
+// });
 
 const openOrderSchema = {
   body: {
