@@ -59,17 +59,11 @@ const calculatePL = async (fastify) => {
       const { type, price, volume } = order;
       const currentBid = parseFloat(latestPrice.bid);
       const currentAsk = parseFloat(latestPrice.ask);
-      const openPriceFloat = parseFloat(price);
-      const lotSizeFloat = parseFloat(volume) || 0.01;
-      const digits = latestPrice.digits;
-      const multiplier = digits === 3 ? 1000 : digits === 5 ? 100000 : digits === 1 ? 10 : 1;
+      const openPriceFloat = parseFloat(order.price);
+      const lotSizeFloat = parseFloat(order.volume) || 0.01;
+      const multiplier = latestPrice.digits === 3 ? 1000 : latestPrice.digits === 5 ? 100000 : latestPrice.digits === 1 ? 10 : 1;
 
-      let pipDifference = 0;
-      if (type === 'buy') {
-        pipDifference = currentBid - openPriceFloat;
-      } else if (type === 'sell') {
-        pipDifference = openPriceFloat - currentAsk;
-      }
+      const pipDifference = order.type === 'buy' ? currentBid - openPriceFloat : openPriceFloat - currentAsk;
 
       return (pipDifference * lotSizeFloat * multiplier).toFixed(2);
     };
@@ -95,24 +89,22 @@ const calculatePL = async (fastify) => {
     if (updates.length === 0) return []; // No updates, return early
 
     // Prepare query components for batch update
-    const ids = updates.map(u => u.id).join(', ');
-    const profitCases = updates.map(u => `WHEN ${u.id} THEN ${u.profit}`).join(' ');
-    const bidCases = updates.map(u => `WHEN ${u.id} THEN ${u.market_bid}`).join(' ');
-    const askCases = updates.map(u => `WHEN ${u.id} THEN ${u.market_ask}`).join(' ');
+    const ids = updates.map(u => u.id);
+    const profitParams = updates.map(u => u.profit);
+    const bidParams = updates.map(u => u.market_bid);
+    const askParams = updates.map(u => u.market_ask);
 
     const updateQuery = `
       UPDATE orders
-      SET
-        profit = CASE id ${profitCases} END,
-        market_bid = CASE id ${bidCases} END,
-        market_ask = CASE id ${askCases} END
-      WHERE id IN (${ids});
+      SET profit = ?, market_bid = ?, market_ask = ?
+      WHERE id = ?
     `;
 
-    // Execute the batch update query
-    await fastify.mysql.query(updateQuery);
+    const updatePromises = updates.map((update) => fastify.mysql.query(updateQuery, [update.profit, update.market_bid, update.market_ask, update.id]));
 
-    return updates; // Return the updated orders
+    // Execute the batch update query
+    await Promise.all(updatePromises);
+    
   } catch (error) {
     console.error('Error calculating P/L:', error);
     return [];
@@ -121,7 +113,7 @@ const calculatePL = async (fastify) => {
 
 // Schedule the cron job to run every minute
 export const scheduleOpenOrderUpdates = (fastify) => {
-    cron.schedule('* * * * * *', async () => {
+    cron.schedule('*/5 * * * * *', async () => {
         await updateOpenOrders(fastify);
         await calculatePL(fastify);
     });
