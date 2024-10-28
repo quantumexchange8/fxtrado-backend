@@ -131,7 +131,11 @@ fastify.register(async function (fastify, opts) {
   scheduleOpenOrderUpdates(fastify);
   FloatingPLOrder(fastify);
   startVolumeCreation(fastify);
-  schedeEveryMinOHLC(fastify);
+  
+});
+
+fastify.register(async function (fastify) {
+  schedeEveryMinOHLC(fastify); // Pass `fastify` to the scheduler
 });
 
 setInterval(fetchExchangeRate, 1000);
