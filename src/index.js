@@ -43,6 +43,14 @@ fastify.register(fastifyMysql, {
     promise: true,
 });
 
+// fastify.register(fastifyMysql, {
+//   host: '127.0.0.1',
+//   user: 'root',
+//   password: 'Test1234.',
+//   database: 'fxtrado',
+//   promise: true,
+// });
+
 let exchangeRateData = {};
 
 const fetchSymbols = async (connection) => {

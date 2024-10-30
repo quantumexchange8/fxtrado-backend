@@ -22,7 +22,8 @@ export const startVolumeCreation = (fastify) => {
             ` SELECT 
                 (SELECT Bid FROM ticks 
                  WHERE Symbol = ? 
-                 AND Date BETWEEN DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 SECOND) AND UTC_TIMESTAMP()
+                 AND Date BETWEEN DATE_SUB(DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND), INTERVAL 1 MINUTE)
+                   AND DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND)
                  ORDER BY Date ASC LIMIT 1) AS open,
             
                 MAX(GREATEST(Bid, Ask)) AS high,
@@ -30,12 +31,14 @@ export const startVolumeCreation = (fastify) => {
             
                 (SELECT Bid FROM ticks 
                  WHERE Symbol = ? 
-                 AND Date BETWEEN DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 SECOND) AND UTC_TIMESTAMP()
+                 AND Date BETWEEN DATE_SUB(DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND), INTERVAL 1 MINUTE)
+                   AND DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND)
                  ORDER BY Date DESC LIMIT 1) AS close
             
               FROM ticks
               WHERE Symbol = ? 
-                AND Date BETWEEN DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 SECOND) AND UTC_TIMESTAMP();
+                AND Date BETWEEN DATE_SUB(DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND), INTERVAL 1 MINUTE)
+               AND DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND);
             `,
             [symbol_pair, symbol_pair, symbol_pair]
           );          
@@ -43,9 +46,18 @@ export const startVolumeCreation = (fastify) => {
           // If data is present, add it to the insert array
           if (ohlcData && ohlcData.length) {
             const { open, high, low, close } = ohlcData[0];
+
             const currentDate = new Date();
+            // Adjust to the last full minute
+            currentDate.setUTCSeconds(0, 0); // Set seconds and milliseconds to zero
+            currentDate.setUTCMinutes(currentDate.getUTCMinutes() - 1); // Subtract one minute
             const date = formatDate(currentDate);
-            // console.log(ohlcData[0])
+
+            // const currentDate = new Date();
+            // const date = formatDate(currentDate);
+
+            // console.log('OHLC Data:', { open, high, low, close, date, symbol_pair });
+            
             // Check if all necessary data is present before inserting
             if (open !== null && high !== null && low !== null && close !== null) {
               
@@ -70,7 +82,7 @@ export const startVolumeCreation = (fastify) => {
           [insertData]
         );
 
-        console.log(`Inserted ${insertData.length} 15-sec candlestick records.`);
+        console.log(`Inserted ${insertData.length} 1-min candlestick records.`);
       } else {
         console.log('No new candlestick data to insert.');
       }
@@ -80,7 +92,7 @@ export const startVolumeCreation = (fastify) => {
       // Release connection in the finally block to ensure it's released even if an error occurs
       if (connection) connection.release();
     }
-  }, 15000); // Interval set to 15 seconds
+  }, 60000); // Interval set to 1 minutes
 };
 
 // Utility function to format the date in 'YYYY-MM-DD HH:mm:ss.SSS' format
