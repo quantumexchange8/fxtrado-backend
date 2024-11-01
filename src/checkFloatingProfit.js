@@ -1,150 +1,123 @@
 import fastify from 'fastify';
 import cron from 'node-cron';
 
+// Main function to check floating profits
 export const checkFloatingProfit = async (fastify) => {
-  try {
-      const prices = await getAllLatestPrices(fastify); // Fetch latest prices
-      await checkUserOrders(fastify, prices);           // Pass prices to user orders checker
-  } catch (error) {
-      console.error('Error checking floating profit:', error);
-  }
-}
+    try {
+        const prices = await getAllLatestPrices(fastify); // Fetch latest prices
+        await checkUserOrders(fastify, prices);           // Pass prices to user orders checker
+    } catch (error) {
+        console.error('Error checking floating profit:', error);
+    }
+};
 
-// latest bid and ask price
+// Function to fetch the latest bid and ask prices
 const getAllLatestPrices = async (fastify) => {
-  try {
-      const [forexPairs] = await fastify.mysql.query('SELECT symbol_pair FROM forex_pairs WHERE status = "active"');
+    try {
+        const [forexPairs] = await fastify.mysql.query('SELECT symbol_pair FROM forex_pairs WHERE status = "active"');
+        if (!forexPairs.length) return []; // Return empty array if no pairs
 
-      if (!forexPairs.length) return [];
+        const symbols = forexPairs.map(pair => pair.symbol_pair);
 
-      const [result] = await fastify.mysql.query(
-          `SELECT symbol, bid, ask 
-           FROM fxtrado.ticks 
-           WHERE symbol IN (?) 
-           AND Date = (SELECT MAX(Date) FROM fxtrado.ticks WHERE symbol = fxtrado.ticks.symbol)`,
-          [forexPairs.map(pair => pair.symbol_pair)]
-      );
+        // Fetch latest prices for the active forex pairs
+        const [result] = await fastify.mysql.query(
+            `SELECT symbol, bid, ask, digits
+             FROM fxtrado.ticks 
+             WHERE symbol IN (?) 
+             AND Date = (SELECT MAX(Date) FROM fxtrado.ticks WHERE symbol = fxtrado.ticks.symbol)`,
+            [symbols]
+        );
 
-      return result; // Return all the latest prices
-  } catch (error) {
-      console.error('Error fetching latest prices:', error);
-      return [];
-  }
+        // Create a map for easy lookup
+        const priceMap = new Map(result.map(p => [p.symbol, p]));
+        return priceMap; // Return a map of the latest prices
+    } catch (error) {
+        console.error('Error fetching latest prices:', error);
+        return new Map(); // Return an empty map in case of error
+    }
 };
 
+// Function to calculate floating profit
 const calculateFloatingProfit = (order, currentPrice) => {
-    // Make sure currentPrice is an object with symbol, bid, and ask prices
-    if (!currentPrice || !currentPrice.bid || !currentPrice.ask) {
+    if (!currentPrice || typeof currentPrice.bid !== 'number' || typeof currentPrice.ask !== 'number') {
         console.error('Invalid price data for symbol:', order.symbol);
-        return 0;
+        return 0; // Return 0 if price data is invalid
     }
 
-    const price = order.type === 'buy' ? parseFloat(currentPrice.bid) : parseFloat(currentPrice.ask);
-    const digits = currentPrice.digits;
+    const price = order.type === 'buy' ? currentPrice.bid : currentPrice.ask;
+    const decimalDigit = currentPrice.digits === 5 ? 100000 : (currentPrice.digits === 3 ? 1000 : 10);
 
-    let decimal_digit = 10;
-    if (digits === 5) {
-      decimal_digit = 100000;
-    } else if (digits === 3) {
-      decimal_digit = 1000;
-    } else {
-      decimal_digit = 10;
-    }
-
-    if (order.type === 'buy') {
-        return (price - order.price) * order.volume * decimal_digit;
-    } else {
-        return (order.price - price) * order.volume * decimal_digit;
-    }
+    // Calculate and return floating profit
+    return (order.type === 'buy' ? (price - order.price) : (order.price - price)) * order.volume * decimalDigit;
 };
 
-
+// Function to check user orders
 const checkUserOrders = async (fastify, prices) => {
     try {
-      const [users] = await fastify.mysql.query('SELECT * FROM users');
-    
-      let orderProfit;
-      for (const user of users) {
-        // Fetch all open orders for this user
-        const [orders] = await fastify.mysql.query('SELECT * FROM orders WHERE user_id = ? AND status = "open"', [user.id]);
-  
-        // If no orders, continue to the next user
-        if (!orders.length) continue;
+        const [users] = await fastify.mysql.query('SELECT * FROM users');
 
-        // Sum the negative profit values
-        let totalNegativeProfit = 0;
-        for (const order of orders) {
-          const currentPrice = prices.find(p => p.symbol === order.symbol);
-          const floatingProfit = calculateFloatingProfit(order, currentPrice);
-          if (floatingProfit < 0) totalNegativeProfit += floatingProfit;
-      }
+        for (const user of users) {
+            const [orders] = await fastify.mysql.query('SELECT * FROM orders WHERE user_id = ? AND status = "open"', [user.id]);
+            if (!orders.length) continue; // If no orders, continue to the next user
 
-        // Fetch user's wallet balance
-        const [wallets] = await fastify.mysql.query('SELECT * FROM wallets WHERE user_id = ?', [user.id]);
-        const wallet = wallets[0]; // Assuming each user has one wallet
-
-        // If total negative profit exceeds the user's wallet balance, close the orders
-        if (Math.abs(totalNegativeProfit) > wallet.balance) {
-          console.log(`User ${user.id} has exceeded their wallet balance. Closing orders...`);
-
-          await closeUserOrders(fastify, user.id, totalNegativeProfit);
-
-          // for (const order of orders) {
-          //   // Calculate the close price based on market conditions
-          //   let close_price;
-          //   if (order.type === 'buy') {
-          //     close_price = order.market_bid; // For buy orders, we sell at the bid price
-          //   } else if (order.type === 'sell') {
-          //     close_price = order.market_ask; // For sell orders, we buy at the ask price
-          //   }
-      
-          //   // Calculate closed_profit
-          //   const price_diff = (order.type === 'buy') ? (close_price - order.price) : (order.price - close_price);
-          //   const closed_profit = price_diff * order.lot_size;
-      
-          //   // Update each order with close_price and closed_profit
-          //   await fastify.mysql.query(`
-          //     UPDATE orders 
-          //     SET status = "closed", remark = "Burst", close_time = NOW(), close_price = ?, closed_profit = ?
-          //     WHERE id = ?
-          //   `, [close_price, closed_profit, order.id]);
-          // }
-  
-          // Update the status of all this user's orders to 'closed'
-          // await fastify.mysql.query('UPDATE orders SET status = "closed", remark = "Burst", closed_profit = ?, close_time = NOW() WHERE user_id = ? AND status = "open"', [orderProfit , user.id]);
-          // await fastify.mysql.query('UPDATE wallets SET balance = 0.00 WHERE user_id = ? ', [user.id]);
+            const totalNegativeProfit = await processOrders(orders, prices); // Calculate negative profits
+            await handleNegativeProfit(fastify, user.id, totalNegativeProfit); // Handle negative profits
         }
-      }
     } catch (error) {
-      console.error('Error checking orders:', error);
+        console.error('Error checking orders:', error);
     }
 };
 
-const closeUserOrders = async (fastify, userId, totalNegativeProfit) => {
-  try {
-      const connection = await fastify.mysql.getConnection();
-      await connection.beginTransaction();
+// Function to process orders and calculate total negative profit
+const processOrders = async (orders, priceMap) => {
+    let totalNegativeProfit = 0;
 
-      await connection.query(
-          'UPDATE orders SET status = "closed", remark = "Burst", closed_profit = ?, close_time = NOW() WHERE user_id = ? AND status = "open"',
-          [totalNegativeProfit, userId]
-      );
+    for (const order of orders) {
+        const currentPrice = priceMap.get(order.symbol);
+        const floatingProfit = calculateFloatingProfit(order, currentPrice);
+        if (floatingProfit < 0) totalNegativeProfit += floatingProfit;
+    }
 
-      await connection.query('UPDATE wallets SET balance = 0.00 WHERE user_id = ?', [userId]);
-
-      await connection.commit();
-      connection.release();
-  } catch (error) {
-      console.error(`Error closing orders for user ${userId}:`, error);
-      connection.rollback(); // Rollback transaction on failure
-      connection.release();
-  }
+    return totalNegativeProfit;
 };
 
+// Function to handle negative profits
+const handleNegativeProfit = async (fastify, userId, totalNegativeProfit) => {
+    const [wallets] = await fastify.mysql.query('SELECT * FROM wallets WHERE user_id = ?', [userId]);
+    const wallet = wallets[0];
+
+    // If total negative profit exceeds wallet balance, close orders
+    if (Math.abs(totalNegativeProfit) > wallet.balance) {
+        console.log(`User ${userId} has exceeded their wallet balance. Closing orders...`);
+        await closeUserOrders(fastify, userId, totalNegativeProfit);
+    }
+};
+
+// Function to close user orders and reset wallet balance
+const closeUserOrders = async (fastify, userId, totalNegativeProfit) => {
+    try {
+        const connection = await fastify.mysql.getConnection();
+        await connection.beginTransaction();
+
+        await connection.query(
+            'UPDATE orders SET status = "closed", remark = "Burst", closed_profit = ?, close_time = NOW() WHERE user_id = ? AND status = "open"',
+            [totalNegativeProfit, userId]
+        );
+
+        await connection.query('UPDATE wallets SET balance = 0.00 WHERE user_id = ?', [userId]);
+
+        await connection.commit();
+        connection.release();
+    } catch (error) {
+        console.error(`Error closing orders for user ${userId}:`, error);
+        await connection.rollback(); // Rollback transaction on failure
+        connection.release();
+    }
+};
 
 // Schedule the cron job to run every minute
 export const FloatingPLOrder = (fastify) => {
-    cron.schedule('* * * * * *', async () => {
+    cron.schedule('* * * * *', async () => {
         await checkFloatingProfit(fastify);
     });
 };

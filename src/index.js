@@ -8,7 +8,7 @@ import cors from '@fastify/cors';
 import { startVolumeCreation } from './cronJobs.js';
 import { scheduleOpenOrderUpdates } from './orderCalculation.js';
 import { FloatingPLOrder } from './checkFloatingProfit.js';
-import { schedeEveryMinOHLC } from './livePricing.js';
+// import { schedeEveryMinOHLC } from './livePricing.js';
 import Sensible from '@fastify/sensible'
 
 const fastify = Fastify({
@@ -43,13 +43,7 @@ fastify.register(fastifyMysql, {
     promise: true,
 });
 
-// fastify.register(fastifyMysql, {
-//   host: '127.0.0.1',
-//   user: 'root',
-//   password: 'Test1234.',
-//   database: 'fxtrado',
-//   promise: true,
-// });
+
 
 let exchangeRateData = {};
 
@@ -73,7 +67,7 @@ const fetchSymbols = async (connection) => {
 const fetchExchangeRate = async () => {
   let connection;
 
-  const date = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  
 
   try {
     connection = await fastify.mysql.getConnection();
@@ -99,6 +93,7 @@ const fetchExchangeRate = async () => {
         });
 
         // Logging the data
+        const date = new Date().toISOString().slice(0, 19).replace('T', ' ');
         const priceData = response.data.prices[0];
         const bid = priceData.bids[0].price;
         const ask = priceData.asks[0].price;
@@ -142,9 +137,9 @@ fastify.register(async function (fastify, opts) {
   
 });
 
-fastify.register(async function (fastify) {
-  schedeEveryMinOHLC(fastify); // Pass `fastify` to the scheduler
-});
+// fastify.register(async function (fastify) {
+//   schedeEveryMinOHLC(fastify); // Pass `fastify` to the scheduler
+// });
 
 setInterval(fetchExchangeRate, 1000);
 
