@@ -10,13 +10,16 @@ import { scheduleOpenOrderUpdates } from './orderCalculation.js';
 import { FloatingPLOrder } from './checkFloatingProfit.js';
 // import { schedeEveryMinOHLC } from './livePricing.js';
 import Sensible from '@fastify/sensible'
+import dotenv from 'dotenv';
 
 const fastify = Fastify({
     logger: true
 });
 
+dotenv.config();
+
 fastify.register(cors, {
-  origin: ['http://127.0.0.1:8000', 'http://127.0.0.1:8010', 'https://fxtrado-user.currenttech.pro'], // Allow your frontend origins
+  origin: ['http://127.0.0.1:8000', 'http://127.0.0.1:8010', 'https://fxtrado-user.currenttech.pro', 'https://user.fxtrado.com'], // Allow your frontend origins
   methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allow methods used in your API
   credentials: true, // If your API requires credentials (cookies, HTTP authentication)
 });
@@ -35,15 +38,21 @@ const instrument = 'EUR_USD'
 const OANDA_PRICE_URL = `https://api-fxpractice.oanda.com/v3/accounts/${account_id}/pricing`;
 
 // Database Access
+// fastify.register(fastifyMysql, {
+//     host: '68.183.177.155',
+//     user: 'ctadmin',
+//     password: 'CTadmin!123',
+//     database: 'fxtrado',
+//     promise: true,
+// });
+
 fastify.register(fastifyMysql, {
-    host: '68.183.177.155',
-    user: 'ctadmin',
-    password: 'CTadmin!123',
-    database: 'fxtrado',
-    promise: true,
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  promise: true,
 });
-
-
 
 let exchangeRateData = {};
 

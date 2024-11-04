@@ -49,6 +49,7 @@ export const startVolumeCreation = (fastify) => {
             currentDate.setUTCMinutes(currentDate.getUTCMinutes() - 1);
             const date = formatDate(currentDate);
 
+            const localDate = currentDate;
             // Check for duplicates before adding to insert data
             const [existing] = await connection.query(
               `SELECT 1 FROM history_charts WHERE Symbol = ? AND Date = ? LIMIT 1`,
@@ -57,7 +58,7 @@ export const startVolumeCreation = (fastify) => {
 
             // If there's no duplicate, add to insert data
             if (!existing.length && open !== null && high !== null && low !== null && close !== null) {
-              insertData.push([date, open, high, low, close, symbol_pair]);
+              insertData.push([date, localDate, open, high, low, close, symbol_pair]);
             }
           }
         } catch (err) {
@@ -73,7 +74,7 @@ export const startVolumeCreation = (fastify) => {
         await connection.beginTransaction(); // Begin transaction
         await connection.query(
           `
-          INSERT INTO history_charts (Date, Open, High, Low, Close, Symbol)
+          INSERT INTO history_charts (Date, local_date, Open, High, Low, Close, Symbol)
           VALUES ?
         `,
           [insertData]
