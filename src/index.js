@@ -2,6 +2,7 @@ import Fastify from "fastify";
 // import BuyController from './BuyController.js';
 // import UserController from './UserController.js'
 import fastifyMysql from "@fastify/mysql";
+import fastifyEnv from '@fastify/env';
 import axios from 'axios';
 import websocket from '@fastify/websocket';
 import cors from '@fastify/cors';
@@ -12,11 +13,29 @@ import { FloatingPLOrder } from './checkFloatingProfit.js';
 import Sensible from '@fastify/sensible'
 import dotenv from 'dotenv';
 
+dotenv.config(); // Load .env file
+
 const fastify = Fastify({
     logger: true
 });
 
-dotenv.config();
+const schema = {
+  type: 'object',
+  required: ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'DB_PORT'],
+  properties: {
+    DB_HOST: { type: 'string' },
+    DB_USER: { type: 'string' },
+    DB_PASSWORD: { type: 'string' },
+    DB_NAME: { type: 'string' },
+    DB_PORT: { type: 'integer' },
+  },
+};
+
+await fastify.register(fastifyEnv, {
+  dotenv: true, // Automatically load .env file
+  schema: schema,
+  data: process.env, // Load process.env variables
+});
 
 fastify.register(cors, {
   origin: ['http://127.0.0.1:8000', 'http://127.0.0.1:8010', 'https://fxtrado-user.currenttech.pro', 'https://user.fxtrado.com'], // Allow your frontend origins
@@ -37,12 +56,13 @@ const instrument = 'EUR_USD'
 // const OANDA_CANDLES = `https://api-fxpractice.oanda.com/v3/instruments/`;
 const OANDA_PRICE_URL = `https://api-fxpractice.oanda.com/v3/accounts/${account_id}/pricing`;
 
+// Database Access
 fastify.register(fastifyMysql, {
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT,
+  host: fastify.config.DB_HOST,
+  user: fastify.config.DB_USER,
+  password: fastify.config.DB_PASSWORD,
+  database: fastify.config.DB_NAME,
+  port: fastify.config.DB_PORT,
   promise: true,
 });
 
