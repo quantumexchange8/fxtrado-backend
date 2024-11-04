@@ -37,20 +37,12 @@ const instrument = 'EUR_USD'
 // const OANDA_CANDLES = `https://api-fxpractice.oanda.com/v3/instruments/`;
 const OANDA_PRICE_URL = `https://api-fxpractice.oanda.com/v3/accounts/${account_id}/pricing`;
 
-// Database Access
-// fastify.register(fastifyMysql, {
-//     host: '68.183.177.155',
-//     user: 'ctadmin',
-//     password: 'CTadmin!123',
-//     database: 'fxtrado',
-//     promise: true,
-// });
-
 fastify.register(fastifyMysql, {
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  port: process.env.DB_PORT,
   promise: true,
 });
 
