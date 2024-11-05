@@ -7,14 +7,28 @@ export const startVolumeCreation = (fastify) => {
 
       // Fetch all active forex pairs in a single query
       const [forexPairs] = await connection.query(
-        'SELECT symbol_pair FROM forex_pairs WHERE status = "active"'
+        'SELECT symbol_pair, digits FROM forex_pairs WHERE status = "active"'
       );
+
+      // Fetch group symbols with spreads for all symbols in a single query
+      const [groupSymbols] = await connection.query(
+        'SELECT symbol, group_name, spread FROM group_symbols WHERE status = "active"'
+      );
+
+      // Prepare a map for easy access to group spread data
+      const symbolGroupMap = {};
+      groupSymbols.forEach(({ symbol, group_name, spread }) => {
+        if (!symbolGroupMap[symbol]) {
+          symbolGroupMap[symbol] = [];
+        }
+        symbolGroupMap[symbol].push({ symbol, group_name, spread });
+      });
 
       // Array to store bulk insert data
       const insertData = [];
 
       // Process each forex pair and prepare OHLC data for insertion
-      const promises = forexPairs.map(async ({ symbol_pair }) => {
+      const promises = forexPairs.map(async ({ symbol_pair, digits }) => {
         try {
           // Fetch OHLC data for the last 1 minute
           const [ohlcData] = await connection.query(
@@ -49,16 +63,27 @@ export const startVolumeCreation = (fastify) => {
             currentDate.setUTCMinutes(currentDate.getUTCMinutes() - 1);
             const date = formatDate(currentDate);
 
-            const localDate = currentDate;
-            // Check for duplicates before adding to insert data
-            const [existing] = await connection.query(
-              `SELECT 1 FROM history_charts WHERE Symbol = ? AND Date = ? LIMIT 1`,
-              [symbol_pair, date]
-            );
+            if (symbolGroupMap[symbol_pair]) {
+              for (const { symbol, group_name, spread } of symbolGroupMap[symbol_pair]) {
+                const spreadFactor = spread / Math.pow(10, digits);
 
-            // If there's no duplicate, add to insert data
-            if (!existing.length && open !== null && high !== null && low !== null && close !== null) {
-              insertData.push([date, localDate, open, high, low, close, symbol_pair]);
+                const adjustedOpen = open + spreadFactor;
+                const adjustedHigh = high + spreadFactor;
+                const adjustedLow = low + spreadFactor;
+                const adjustedClose = close + spreadFactor;
+
+                const localDate = currentDate;
+                // Check for duplicates before adding to insert data
+                const [existing] = await connection.query(
+                  `SELECT 1 FROM history_charts WHERE Symbol = ? AND Date = ? AND \`group\` = ? LIMIT 1`,
+                  [symbol_pair, date, group_name]
+                );
+
+                // If there's no duplicate, add to insert data
+                if (!existing.length && open !== null && high !== null && low !== null && close !== null) {
+                  insertData.push([group_name, date, localDate, adjustedOpen, adjustedHigh, adjustedLow, adjustedClose, symbol_pair]);
+                }
+              }
             }
           }
         } catch (err) {
@@ -74,7 +99,7 @@ export const startVolumeCreation = (fastify) => {
         await connection.beginTransaction(); // Begin transaction
         await connection.query(
           `
-          INSERT INTO history_charts (Date, local_date, Open, High, Low, Close, Symbol)
+          INSERT INTO history_charts (\`group\`, Date, local_date, Open, High, Low, Close, Symbol)
           VALUES ?
         `,
           [insertData]

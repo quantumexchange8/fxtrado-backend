@@ -216,7 +216,7 @@ const getActiveForexPairs = async () => {
 
 const getAllLatestPrices = async (forexPairs) => {
   const [result] = await fastify.mysql.query(
-    `SELECT symbol, bid, ask 
+    `SELECT symbol, bid, ask, digits
      FROM ticks 
      WHERE symbol IN (?) 
      AND Date = (SELECT MAX(Date) FROM ticks WHERE symbol = ticks.symbol)`,
@@ -252,6 +252,7 @@ fastify.register(async function (fastify) {
                 symbol: latestPrice.symbol,
                 bid: latestPrice.bid,
                 ask: latestPrice.ask,
+                digits: latestPrice.digits,
               })
             );
           });
