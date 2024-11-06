@@ -17,6 +17,20 @@ export const updateOpenOrders = async (fastify) => {
   }
 };
 
+// Function to get group spread
+const getAllSpread = async (fastify) => {
+  const [spreadData] = await fastify.mysql.query(
+    'SELECT group_name, symbol, spread FROM group_symbols WHERE status = "active"'
+  );
+
+  const spreadMap = new Map();
+  spreadData.forEach(({ group_name, symbol, spread }) => {
+    spreadMap.set(`${group_name}_${symbol}`, spread);
+  });
+
+  return spreadMap;
+};
+
 // Function to get open orders
 const getOpenOrders = async (fastify) => {
   const [orders] = await fastify.mysql.query('SELECT * FROM orders WHERE status = "open" AND close_price is NULL');
@@ -29,7 +43,7 @@ const getAllLatestPrices = async (fastify) => {
   const [forexPairs] = await fastify.mysql.query('SELECT currency_pair, symbol_pair, digits FROM forex_pairs WHERE status = "active"');
   
   const [result] = await fastify.mysql.query(
-    `SELECT symbol, bid, ask 
+    `SELECT symbol, bid, ask, digits 
      FROM fxtrado.ticks 
      WHERE symbol IN (?) 
      AND Date = (SELECT MAX(Date) FROM fxtrado.ticks WHERE symbol = fxtrado.ticks.symbol)`,
@@ -47,7 +61,7 @@ const getAllLatestPrices = async (fastify) => {
 const calculatePL = async (fastify) => {
   try {
     // Fetch open orders and latest prices in parallel
-    const [orders, latestPrices] = await Promise.all([getOpenOrders(fastify), getAllLatestPrices(fastify)]);
+    const [orders, latestPrices, spreadMap] = await Promise.all([getOpenOrders(fastify), getAllLatestPrices(fastify), getAllSpread(fastify)]);
 
     if (orders.length === 0 || latestPrices.length === 0) return []; // No data to process
 
@@ -56,14 +70,21 @@ const calculatePL = async (fastify) => {
 
     // Utility function to calculate profit
     const calculateProfit = (order, latestPrice) => {
-      const { type, price, volume } = order;
-      const currentBid = parseFloat(latestPrice.bid);
-      const currentAsk = parseFloat(latestPrice.ask);
+      const { type, price, volume, group_name, symbol } = order;
+
       const openPriceFloat = parseFloat(order.price);
       const lotSizeFloat = parseFloat(order.volume) || 0.01;
+
+      // Retrieve spread for this order's group and symbol
+      const spread = spreadMap.get(`${group_name}_${symbol}`) || 0;
+      const spreadFactor = spread / Math.pow(10, latestPrice.digits);
+
+      const adjustedBid = parseFloat(latestPrice.bid) + spreadFactor;
+      const adjustedAsk = parseFloat(latestPrice.ask) + spreadFactor;
+
       const multiplier = latestPrice.digits === 3 ? 1000 : latestPrice.digits === 5 ? 100000 : latestPrice.digits === 1 ? 10 : 1;
 
-      const pipDifference = order.type === 'buy' ? currentBid - openPriceFloat : openPriceFloat - currentAsk;
+      const pipDifference = order.type === 'buy' ? adjustedBid - openPriceFloat : openPriceFloat - adjustedAsk;
 
       return (pipDifference * lotSizeFloat * multiplier).toFixed(2);
     };
@@ -78,11 +99,19 @@ const calculatePL = async (fastify) => {
       }
 
       const profit = calculateProfit(order, latestPrice);
+
+      // Retrieve spread for this order's group and symbol
+      const spread = spreadMap.get(`${order.group_name}_${order.symbol}`) || 0;
+      const spreadFactor = spread / Math.pow(10, latestPrice.digits);
+
+      const adjustedBid = parseFloat(latestPrice.bid) + spreadFactor;
+      const adjustedAsk = parseFloat(latestPrice.ask) + spreadFactor;
+
       updates.push({
         id: order.id,
         profit,
-        market_bid: parseFloat(latestPrice.bid),
-        market_ask: parseFloat(latestPrice.ask),
+        market_bid: adjustedBid.toFixed(latestPrice.digits),
+        market_ask: adjustedAsk.toFixed(latestPrice.digits),
       });
     }
 
