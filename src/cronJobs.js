@@ -1,125 +1,168 @@
+import cron from 'node-cron';
+
 export const startVolumeCreation = (fastify) => {
+  // Initialize the symbol group map outside of intervals to be shared by both intervals
+  let symbolGroupMap = {};
+
+  // Function to fetch and update symbolGroupMap every second
+  const updateSymbolGroupMap = async () => {
+    let connection;
+    try {
+      connection = await fastify.mysql.getConnection();
+      const [groupSymbols] = await connection.query(
+        'SELECT symbol, group_name, spread FROM group_symbols WHERE status = "active"'
+      );
+
+      const newSymbolGroupMap = {};
+      groupSymbols.forEach(({ symbol, group_name, spread }) => {
+        if (!newSymbolGroupMap[symbol]) {
+          newSymbolGroupMap[symbol] = [];
+        }
+        newSymbolGroupMap[symbol].push({ symbol, group_name, spread });
+      });
+      symbolGroupMap = newSymbolGroupMap; // Update the map with latest data
+    } catch (err) {
+      console.error("Error updating symbol group map:", err);
+    } finally {
+      if (connection) connection.release();
+    }
+  };
+  
+  // Start the interval to update the symbolGroupMap every second
+  setInterval(updateSymbolGroupMap, 1000);
+
   // Run every minute
   setInterval(async () => {
     let connection;
     try {
       connection = await fastify.mysql.getConnection();
 
-      // Fetch all active forex pairs in a single query
+      // Fetch all active forex pairs
       const [forexPairs] = await connection.query(
         'SELECT symbol_pair, digits FROM forex_pairs WHERE status = "active"'
       );
 
-      // Fetch group symbols with spreads for all symbols in a single query
-      const [groupSymbols] = await connection.query(
-        'SELECT symbol, group_name, spread FROM group_symbols WHERE status = "active"'
-      );
+      const currentDate = new Date();
+      currentDate.setUTCSeconds(0, 0); // Reset seconds and milliseconds to zero
+      const date = formatDate(currentDate);
 
-      // Prepare a map for easy access to group spread data
-      const symbolGroupMap = {};
-      groupSymbols.forEach(({ symbol, group_name, spread }) => {
-        if (!symbolGroupMap[symbol]) {
-          symbolGroupMap[symbol] = [];
+      // Insert initial OHLC data for all symbols at the start of the minute
+      const insertData = [];
+      const promises = forexPairs.map(async ({ symbol_pair, digits }) => {
+        const [tickData] = await connection.query(
+          `SELECT Bid, Ask, digits FROM ticks 
+           WHERE Symbol = ? 
+           ORDER BY Date DESC LIMIT 1`,
+          [symbol_pair]
+        );
+
+        if (tickData && tickData.length) {
+          const { Bid: openPrice } = tickData[0];
+          if (symbolGroupMap[symbol_pair]) {
+            for (const { group_name, spread } of symbolGroupMap[symbol_pair]) {
+              const spreadFactor = spread / Math.pow(10, digits);
+              const adjustedOpen = openPrice + spreadFactor;
+
+              insertData.push([
+                group_name,
+                date,
+                currentDate,
+                adjustedOpen, // Open
+                adjustedOpen, // High initially set to open
+                adjustedOpen, // Low initially set to open
+                adjustedOpen, // Close is initially null
+                symbol_pair
+              ]);
+            }
+          }
         }
-        symbolGroupMap[symbol].push({ symbol, group_name, spread });
       });
 
-      // Array to store bulk insert data
-      const insertData = [];
+      await Promise.all(promises);
 
-      // Process each forex pair and prepare OHLC data for insertion
-      const promises = forexPairs.map(async ({ symbol_pair, digits }) => {
+      // Perform bulk insertion for initial OHLC data
+      if (insertData.length > 0) {
+        await connection.beginTransaction();
+        await connection.query(
+          `INSERT INTO history_charts (\`group\`, Date, local_date, Open, High, Low, Close, Symbol)
+           VALUES ?`,
+          [insertData]
+        );
+        await connection.commit();
+        console.log(`Inserted initial OHLC records for ${insertData.length} records.`);
+      }
+
+      // Update High and Low values during the minute
+      setInterval(async () => {
         try {
-          // Fetch OHLC data for the last 1 minute
-          const [ohlcData] = await connection.query(
-            `SELECT 
-                (SELECT Bid FROM ticks 
-                 WHERE Symbol = ? 
-                 AND Date BETWEEN DATE_SUB(DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND), INTERVAL 1 MINUTE)
-                   AND DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND)
-                 ORDER BY Date ASC LIMIT 1) AS open,
-                
-                MAX(GREATEST(Bid, Ask)) AS high,
-                MIN(LEAST(Bid, Ask)) AS low,
-                
-                (SELECT Bid FROM ticks 
-                 WHERE Symbol = ? 
-                 AND Date BETWEEN DATE_SUB(DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND), INTERVAL 1 MINUTE)
-                   AND DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND)
-                 ORDER BY Date DESC LIMIT 1) AS close
-              FROM ticks
-              WHERE Symbol = ? 
-                AND Date BETWEEN DATE_SUB(DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND), INTERVAL 1 MINUTE)
-               AND DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND);
-            `,
-            [symbol_pair, symbol_pair, symbol_pair]
-          );
-
-          // If OHLC data is present, prepare it for insertion
-          if (ohlcData && ohlcData.length) {
-            const { open, high, low, close } = ohlcData[0];
-            const currentDate = new Date();
-            currentDate.setUTCSeconds(0, 0);
-            currentDate.setUTCMinutes(currentDate.getUTCMinutes() - 1);
-            const date = formatDate(currentDate);
-
+          for (const { symbol_pair, digits } of forexPairs) {
             if (symbolGroupMap[symbol_pair]) {
-              for (const { symbol, group_name, spread } of symbolGroupMap[symbol_pair]) {
-                const spreadFactor = spread / Math.pow(10, digits);
+              const [latestTick] = await connection.query(
+                `SELECT Bid, Ask FROM ticks 
+                 WHERE Symbol = ? 
+                 AND Date >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND)`,
+                [symbol_pair]
+              );
 
-                const adjustedOpen = open + spreadFactor;
-                const adjustedHigh = high + spreadFactor;
-                const adjustedLow = low + spreadFactor;
-                const adjustedClose = close + spreadFactor;
+              if (latestTick && latestTick.length) {
+                const { Bid, Ask } = latestTick[0];
+                const highPrice = Math.max(Bid, Ask);
+                const lowPrice = Math.min(Bid, Ask);
 
-                const localDate = currentDate;
-                // Check for duplicates before adding to insert data
-                const [existing] = await connection.query(
-                  `SELECT 1 FROM history_charts WHERE Symbol = ? AND Date = ? AND \`group\` = ? LIMIT 1`,
-                  [symbol_pair, date, group_name]
-                );
+                for (const { group_name, spread } of symbolGroupMap[symbol_pair]) {
+                  const spreadFactor = spread / Math.pow(10, digits);
+                  // console.log('spreadFactor', spreadFactor)
 
-                // If there's no duplicate, add to insert data
-                if (!existing.length && open !== null && high !== null && low !== null && close !== null) {
-                  insertData.push([group_name, date, localDate, adjustedOpen, adjustedHigh, adjustedLow, adjustedClose, symbol_pair]);
+                  await connection.query(
+                    `UPDATE history_charts 
+                     SET High = GREATEST(High, ?), Low = LEAST(Low, ?)
+                     WHERE Symbol = ? AND Date = ? AND \`group\` = ?`,
+                    [highPrice + spreadFactor, lowPrice + spreadFactor, symbol_pair, date, group_name]
+                  );
                 }
               }
             }
           }
-        } catch (err) {
-          console.error(`Error processing currency pair ${symbol_pair}:`, err);
+        } catch (updateError) {
+          console.error("Error updating high/low prices:", updateError);
         }
-      });
+      }, 1000); // Check every second for updates
 
-      // Wait for all forex pairs to be processed
-      await Promise.all(promises);
-
-      // If there's data to insert, perform bulk insertion
-      if (insertData.length > 0) {
-        await connection.beginTransaction(); // Begin transaction
-        await connection.query(
-          `
-          INSERT INTO history_charts (\`group\`, Date, local_date, Open, High, Low, Close, Symbol)
-          VALUES ?
-        `,
-          [insertData]
+      // Update the Close price at the end of the minute
+      cron.schedule('59 * * * * *', async () => {
+        const [closeTickData] = await connection.query(
+          `SELECT Symbol, Bid, digits FROM ticks 
+           WHERE Date >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND)`
         );
-        await connection.commit(); // Commit transaction
-        console.log(`Inserted ${insertData.length} 1-min candlestick records.`);
-      } else {
-        console.log('No new candlestick data to insert.');
-      }
+
+        closeTickData.forEach(async ({ Symbol, Bid, digits }) => {
+          if (symbolGroupMap[Symbol]) {
+            for (const { group_name, spread } of symbolGroupMap[Symbol]) {
+              const spreadFactor = spread / Math.pow(10, digits);
+
+              const closeBid = Bid + spreadFactor;
+              // console.log('closeBid', closeBid, '= ', Bid, spreadFactor)
+              await connection.query(
+                `UPDATE history_charts 
+                 SET Close = ?
+                 WHERE Symbol = ? AND Date = ? AND \`group\` = ?`,
+                [closeBid, Symbol, date, group_name]
+              );
+            }
+          }
+        });
+      }); // Update close price at the end of the minute (59 seconds in)
+
     } catch (err) {
-      console.error('Error processing candlestick data:', err);
-      if (connection) await connection.rollback(); // Rollback if error occurs
+      console.error("Error processing candlestick data:", err);
+      if (connection) await connection.rollback();
     } finally {
-      // Release connection in the finally block
       if (connection) connection.release();
     }
-  }, 60000); // Interval set to 1 minute
+  }, 60000);
 };
 
-// Utility function to format the date in 'YYYY-MM-DD HH:mm:ss.SSS' format
+// Utility function to format the date in 'YYYY-MM-DD HH:mm:ss.000' format
 const formatDate = (date) => {
   return (
     date.getUTCFullYear() +
@@ -133,6 +176,6 @@ const formatDate = (date) => {
     String(date.getUTCMinutes()).padStart(2, '0') +
     ':' +
     String(date.getUTCSeconds()).padStart(2, '0') +
-    '.00'
+    '.000'
   );
 };
