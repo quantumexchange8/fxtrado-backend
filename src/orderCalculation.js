@@ -82,7 +82,7 @@ const calculatePL = async (fastify) => {
       const adjustedBid = parseFloat(latestPrice.bid) + spreadFactor;
       const adjustedAsk = parseFloat(latestPrice.ask) + spreadFactor;
 
-      const multiplier = latestPrice.digits === 3 ? 1000 : latestPrice.digits === 5 ? 100000 : latestPrice.digits === 1 ? 10 : 1;
+      const multiplier = latestPrice.digits === 3 ? 1000 : latestPrice.digits === 5 ? 100000 : latestPrice.digits === 1 ? 10 : latestPrice.digits === 2 ? 100 : 1;
 
       const pipDifference = order.type === 'buy' ? adjustedBid - openPriceFloat : openPriceFloat - adjustedAsk;
 

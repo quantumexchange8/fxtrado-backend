@@ -45,7 +45,7 @@ const calculateFloatingProfit = (order, currentPrice) => {
     }
 
     const price = order.type === 'buy' ? currentPrice.bid : currentPrice.ask;
-    const decimalDigit = currentPrice.digits === 5 ? 100000 : (currentPrice.digits === 3 ? 1000 : 10);
+    const decimalDigit = currentPrice.digits === 5 ? 100000 : currentPrice.digits === 3 ? 1000 : currentPrice.digits === 2 ? 100 : 10 ;
 
     // Calculate and return floating profit
     return (order.type === 'buy' ? (price - order.price) : (order.price - price)) * order.volume * decimalDigit;
