@@ -50,7 +50,7 @@ export const startVolumeCreation = (fastify) => {
            WHERE Date = ? AND Symbol IN (?)`,
           [date, symbolList]
       );
-      
+
       // Create a Set of existing keys (Symbol-Date-Group) for easy lookup
       const existingKeys = new Set(
         existingRecords.map(record => `${record.Symbol}-${record.Date}-${record.group}`)
@@ -69,7 +69,7 @@ export const startVolumeCreation = (fastify) => {
           const { Bid: openPrice, Ask: tempClosePrice } = tickData[0];
           const symbolGroups = symbolGroupMap[symbol_pair] || [];
 
-          symbolGroups.forEach(({ group_name, spread }) => {
+          symbolGroups.forEach(async ({ group_name, spread }) => {
             let spreadFactor;
 
             if (digits === 5) {
@@ -87,19 +87,24 @@ export const startVolumeCreation = (fastify) => {
             const adjustedOpen = openPrice + spreadFactor;
             const adjustedClose = tempClosePrice + spreadFactor;
 
-            // Check if this Symbol-Date-Group already exists in the existingKeys set
-            const recordKey = `${symbol_pair}-${date}-${group_name}`;
-            if (!existingKeys.has(recordKey)) {
-                insertData.push([
-                    group_name,
-                    date,
-                    currentDate,
-                    adjustedOpen, // Open
-                    adjustedOpen, // High
-                    adjustedOpen, // Low
-                    adjustedClose, // Close
-                    symbol_pair
-                ]);
+            // Check if the record already exists in the database
+            const [existing] = await connection.query(
+              `SELECT 1 FROM history_charts WHERE Symbol = ? AND Date = ? AND \`group\` = ? LIMIT 1`,
+              [symbol_pair, date, group_name]
+            );
+
+            // If no existing record is found, prepare data for insertion
+            if (!existing.length) {
+              insertData.push([
+                group_name,
+                date,
+                currentDate,     // This should be in UTC for consistency
+                adjustedOpen,    // Open
+                adjustedOpen,    // High
+                adjustedOpen,    // Low
+                adjustedClose,   // Close
+                symbol_pair
+              ]);
             }
           });
         }
@@ -144,11 +149,14 @@ export const startVolumeCreation = (fastify) => {
                 spreadFactor = spread / Math.pow(10, digits);  // Default fallback for other cases
               }
 
+              const roundedHigh = parseFloat((highPrice + spreadFactor).toFixed(digits));
+              const roundedLow = parseFloat((lowPrice + spreadFactor).toFixed(digits));
+
               await connection.query(
                 `UPDATE history_charts 
                  SET High = GREATEST(High, ?), Low = LEAST(Low, ?)
                  WHERE Symbol = ? AND Date = ? AND \`group\` = ?`,
-                [highPrice + spreadFactor, lowPrice + spreadFactor, Symbol, date, group_name]
+                [roundedHigh, roundedLow, Symbol, date, group_name]
               );
             });
           });
@@ -182,11 +190,13 @@ export const startVolumeCreation = (fastify) => {
               spreadFactor = spread / Math.pow(10, digits);  // Default fallback for other cases
             }
 
+            const roundedClose = parseFloat((Bid + spreadFactor).toFixed(digits));
+
             await connection.query(
               `UPDATE history_charts 
                SET Close = ?
                WHERE Symbol = ? AND Date = ? AND \`group\` = ?`,
-              [Bid + spreadFactor, Symbol, date, group_name]
+              [roundedClose, Symbol, date, group_name]
             );
           }
         }

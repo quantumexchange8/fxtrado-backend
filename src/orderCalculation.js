@@ -37,7 +37,23 @@ const getOpenOrders = async (fastify) => {
 
   return orders;
 };
-    
+
+// Calculate spread factor based on the number of digits for each symbol
+const calculateSpreadFactor = (spread, digits) => {
+  switch (digits) {
+    case 5:
+      return spread / 100000;  // EURUSD or similar with 5 digits
+    case 3:
+      return spread / 1000;    // USDJPY or similar with 3 digits
+    case 2:
+      return spread / 100;     // For assets with 2 decimal places
+    case 1:
+      return spread / 10;      // For assets with 1 decimal place
+    default:
+      return spread / Math.pow(10, digits);  // Fallback for other cases
+  }
+};
+
 // Function to get the latest bid and ask prices
 const getAllLatestPrices = async (fastify) => {
   const [forexPairs] = await fastify.mysql.query('SELECT currency_pair, symbol_pair, digits FROM forex_pairs WHERE status = "active"');
@@ -77,12 +93,15 @@ const calculatePL = async (fastify) => {
 
       // Retrieve spread for this order's group and symbol
       const spread = spreadMap.get(`${group_name}_${symbol}`) || 0;
-      const spreadFactor = spread / Math.pow(10, latestPrice.digits);
+      const spreadFactor = calculateSpreadFactor(spread, latestPrice.digits);
 
       const adjustedBid = parseFloat(latestPrice.bid) + spreadFactor;
       const adjustedAsk = parseFloat(latestPrice.ask) + spreadFactor;
 
-      const multiplier = latestPrice.digits === 3 ? 1000 : latestPrice.digits === 5 ? 100000 : latestPrice.digits === 1 ? 10 : latestPrice.digits === 2 ? 100 : 1;
+      const multiplier =  latestPrice.digits === 3 ? 1000 : 
+                          latestPrice.digits === 5 ? 100000 : 
+                          latestPrice.digits === 1 ? 10 : 
+                          latestPrice.digits === 2 ? 100 : 1;
 
       const pipDifference = order.type === 'buy' ? adjustedBid - openPriceFloat : openPriceFloat - adjustedAsk;
 
@@ -102,20 +121,7 @@ const calculatePL = async (fastify) => {
 
       // Retrieve spread for this order's group and symbol
       const spread = spreadMap.get(`${order.group_name}_${order.symbol}`) || 0;
-
-      let spreadFactor;
-            
-      if (latestPrice.digits === 5) {
-        spreadFactor = spread / Math.pow(10, latestPrice.digits);  // e.g., EURUSD or similar pairs
-      } else if (latestPrice.digits === 3) {
-        spreadFactor = spread / 1000;  // e.g., USDJPY or similar pairs
-      } else if (latestPrice.digits === 2) {
-        spreadFactor = spread / 100;   // For assets with two decimal places
-      } else if (latestPrice.digits === 1) {
-        spreadFactor = spread / 10;    // For assets with one decimal place
-      } else {
-        spreadFactor = spread / Math.pow(10, latestPrice.digits);  // Default fallback for other cases
-      }
+      const spreadFactor = calculateSpreadFactor(spread, latestPrice.digits);
 
       const adjustedBid = parseFloat(latestPrice.bid) + spreadFactor;
       const adjustedAsk = parseFloat(latestPrice.ask) + spreadFactor;
