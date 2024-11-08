@@ -1,7 +1,6 @@
 import cron from 'node-cron';
 
 export const startVolumeCreation = (fastify) => {
-  // Initialize the symbol group map outside of intervals to be shared by both intervals
   let symbolGroupMap = {};
 
   // Function to fetch and update symbolGroupMap every second
@@ -13,14 +12,11 @@ export const startVolumeCreation = (fastify) => {
         'SELECT symbol, group_name, spread FROM group_symbols WHERE status = "active"'
       );
 
-      const newSymbolGroupMap = {};
-      groupSymbols.forEach(({ symbol, group_name, spread }) => {
-        if (!newSymbolGroupMap[symbol]) {
-          newSymbolGroupMap[symbol] = [];
-        }
-        newSymbolGroupMap[symbol].push({ symbol, group_name, spread });
-      });
-      symbolGroupMap = newSymbolGroupMap; // Update the map with latest data
+      symbolGroupMap = groupSymbols.reduce((acc, { symbol, group_name, spread }) => {
+        acc[symbol] = acc[symbol] || [];
+        acc[symbol].push({ group_name, spread });
+        return acc;
+      }, {});
     } catch (err) {
       console.error("Error updating symbol group map:", err);
     } finally {
@@ -31,57 +27,67 @@ export const startVolumeCreation = (fastify) => {
   // Start the interval to update the symbolGroupMap every second
   setInterval(updateSymbolGroupMap, 1000);
 
-  // Run every minute
-  setInterval(async () => {
+  // Run every minute using cron
+  cron.schedule('* * * * *', async () => {
     let connection;
     try {
       connection = await fastify.mysql.getConnection();
 
-      // Fetch all active forex pairs
       const [forexPairs] = await connection.query(
         'SELECT symbol_pair, digits FROM forex_pairs WHERE status = "active"'
       );
 
       const currentDate = new Date();
       currentDate.setUTCSeconds(0, 0); // Reset seconds and milliseconds to zero
+      currentDate.setUTCMinutes(currentDate.getUTCMinutes() - 1);
       const date = formatDate(currentDate);
 
-      // Insert initial OHLC data for all symbols at the start of the minute
       const insertData = [];
-      const promises = forexPairs.map(async ({ symbol_pair, digits }) => {
+      for (const { symbol_pair, digits } of forexPairs) {
         const [tickData] = await connection.query(
-          `SELECT Bid, Ask, digits FROM ticks 
+          `SELECT Bid, Ask FROM ticks 
            WHERE Symbol = ? 
            ORDER BY Date DESC LIMIT 1`,
           [symbol_pair]
         );
 
-        if (tickData && tickData.length) {
-          const { Bid: openPrice } = tickData[0];
-          if (symbolGroupMap[symbol_pair]) {
-            for (const { group_name, spread } of symbolGroupMap[symbol_pair]) {
-              const spreadFactor = spread / Math.pow(10, digits);
-              const adjustedOpen = openPrice + spreadFactor;
+        if (tickData.length) {
+          const { Bid: openPrice, Ask: tempClosePrice } = tickData[0];
+          const symbolGroups = symbolGroupMap[symbol_pair] || [];
 
-              insertData.push([
-                group_name,
-                date,
-                currentDate,
-                adjustedOpen, // Open
-                adjustedOpen, // High initially set to open
-                adjustedOpen, // Low initially set to open
-                adjustedOpen, // Close is initially null
-                symbol_pair
-              ]);
+          symbolGroups.forEach(({ group_name, spread }) => {
+            let spreadFactor;
+
+            if (digits === 5) {
+              spreadFactor = spread / Math.pow(10, digits);  // e.g., EURUSD or similar pairs
+            } else if (digits === 3) {
+              spreadFactor = spread / 1000;  // e.g., USDJPY or similar pairs
+            } else if (digits === 2) {
+              spreadFactor = spread / 100;   // For assets with two decimal places
+            } else if (digits === 1) {
+              spreadFactor = spread / 10;    // For assets with one decimal place
+            } else {
+              spreadFactor = spread / Math.pow(10, digits);  // Default fallback for other cases
             }
-          }
+
+            const adjustedOpen = openPrice + spreadFactor;
+            const adjustedClose = tempClosePrice + spreadFactor;
+
+            insertData.push([
+              group_name,
+              date,
+              currentDate,
+              adjustedOpen, // Open
+              adjustedOpen, // High
+              adjustedOpen, // Low
+              adjustedClose, // Close
+              symbol_pair
+            ]);
+          });
         }
-      });
+      }
 
-      await Promise.all(promises);
-
-      // Perform bulk insertion for initial OHLC data
-      if (insertData.length > 0) {
+      if (insertData.length) {
         await connection.beginTransaction();
         await connection.query(
           `INSERT INTO history_charts (\`group\`, Date, local_date, Open, High, Low, Close, Symbol)
@@ -92,66 +98,81 @@ export const startVolumeCreation = (fastify) => {
         console.log(`Inserted initial OHLC records for ${insertData.length} records.`);
       }
 
-      // Update High and Low values during the minute
-      setInterval(async () => {
+      // Update High, Low, and Close values every second during the minute
+      const updateInterval = setInterval(async () => {
         try {
-          for (const { symbol_pair, digits } of forexPairs) {
-            if (symbolGroupMap[symbol_pair]) {
-              const [latestTick] = await connection.query(
-                `SELECT Bid, Ask FROM ticks 
-                 WHERE Symbol = ? 
-                 AND Date >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND)`,
-                [symbol_pair]
-              );
+          const [latestTicks] = await connection.query(
+            `SELECT Symbol, Bid, Ask, digits FROM ticks 
+             WHERE Date >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND)`
+          );
 
-              if (latestTick && latestTick.length) {
-                const { Bid, Ask } = latestTick[0];
-                const highPrice = Math.max(Bid, Ask);
-                const lowPrice = Math.min(Bid, Ask);
+          latestTicks.forEach(({ Symbol, Bid, Ask, digits }) => {
+            const symbolGroups = symbolGroupMap[Symbol] || [];
+            const highPrice = Math.max(Bid, Ask);
+            const lowPrice = Math.min(Bid, Ask);
 
-                for (const { group_name, spread } of symbolGroupMap[symbol_pair]) {
-                  const spreadFactor = spread / Math.pow(10, digits);
-                  // console.log('spreadFactor', spreadFactor)
-
-                  await connection.query(
-                    `UPDATE history_charts 
-                     SET High = GREATEST(High, ?), Low = LEAST(Low, ?)
-                     WHERE Symbol = ? AND Date = ? AND \`group\` = ?`,
-                    [highPrice + spreadFactor, lowPrice + spreadFactor, symbol_pair, date, group_name]
-                  );
-                }
+            symbolGroups.forEach(async ({ group_name, spread }) => {
+               let spreadFactor;
+            
+              if (digits === 5) {
+                spreadFactor = spread / Math.pow(10, digits);  // e.g., EURUSD or similar pairs
+              } else if (digits === 3) {
+                spreadFactor = spread / 1000;  // e.g., USDJPY or similar pairs
+              } else if (digits === 2) {
+                spreadFactor = spread / 100;   // For assets with two decimal places
+              } else if (digits === 1) {
+                spreadFactor = spread / 10;    // For assets with one decimal place
+              } else {
+                spreadFactor = spread / Math.pow(10, digits);  // Default fallback for other cases
               }
-            }
-          }
+
+              await connection.query(
+                `UPDATE history_charts 
+                 SET High = GREATEST(High, ?), Low = LEAST(Low, ?)
+                 WHERE Symbol = ? AND Date = ? AND \`group\` = ?`,
+                [highPrice + spreadFactor, lowPrice + spreadFactor, Symbol, date, group_name]
+              );
+            });
+          });
         } catch (updateError) {
           console.error("Error updating high/low prices:", updateError);
         }
-      }, 1000); // Check every second for updates
+      }, 1000);
 
-      // Update the Close price at the end of the minute
-      cron.schedule('59 * * * * *', async () => {
+      // Schedule the Close update at 59 seconds
+      setTimeout(async () => {
+        clearInterval(updateInterval);
         const [closeTickData] = await connection.query(
           `SELECT Symbol, Bid, digits FROM ticks 
            WHERE Date >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL SECOND(UTC_TIMESTAMP()) SECOND)`
         );
 
-        closeTickData.forEach(async ({ Symbol, Bid, digits }) => {
-          if (symbolGroupMap[Symbol]) {
-            for (const { group_name, spread } of symbolGroupMap[Symbol]) {
-              const spreadFactor = spread / Math.pow(10, digits);
-
-              const closeBid = Bid + spreadFactor;
-              // console.log('closeBid', closeBid, '= ', Bid, spreadFactor)
-              await connection.query(
-                `UPDATE history_charts 
-                 SET Close = ?
-                 WHERE Symbol = ? AND Date = ? AND \`group\` = ?`,
-                [closeBid, Symbol, date, group_name]
-              );
+        for (const { Symbol, Bid, digits } of closeTickData) {
+          const symbolGroups = symbolGroupMap[Symbol] || [];
+          for (const { group_name, spread } of symbolGroups) {
+            let spreadFactor;
+            
+            if (digits === 5) {
+              spreadFactor = spread / Math.pow(10, digits);  // e.g., EURUSD or similar pairs
+            } else if (digits === 3) {
+              spreadFactor = spread / 1000;  // e.g., USDJPY or similar pairs
+            } else if (digits === 2) {
+              spreadFactor = spread / 100;   // For assets with two decimal places
+            } else if (digits === 1) {
+              spreadFactor = spread / 10;    // For assets with one decimal place
+            } else {
+              spreadFactor = spread / Math.pow(10, digits);  // Default fallback for other cases
             }
+
+            await connection.query(
+              `UPDATE history_charts 
+               SET Close = ?
+               WHERE Symbol = ? AND Date = ? AND \`group\` = ?`,
+              [Bid + spreadFactor, Symbol, date, group_name]
+            );
           }
-        });
-      }); // Update close price at the end of the minute (59 seconds in)
+        }
+      }, 59000); // Close update at 59 seconds
 
     } catch (err) {
       console.error("Error processing candlestick data:", err);
@@ -159,7 +180,7 @@ export const startVolumeCreation = (fastify) => {
     } finally {
       if (connection) connection.release();
     }
-  }, 60000);
+  });
 };
 
 // Utility function to format the date in 'YYYY-MM-DD HH:mm:ss.000' format

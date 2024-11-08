@@ -102,7 +102,20 @@ const calculatePL = async (fastify) => {
 
       // Retrieve spread for this order's group and symbol
       const spread = spreadMap.get(`${order.group_name}_${order.symbol}`) || 0;
-      const spreadFactor = spread / Math.pow(10, latestPrice.digits);
+
+      let spreadFactor;
+            
+      if (latestPrice.digits === 5) {
+        spreadFactor = spread / Math.pow(10, latestPrice.digits);  // e.g., EURUSD or similar pairs
+      } else if (latestPrice.digits === 3) {
+        spreadFactor = spread / 1000;  // e.g., USDJPY or similar pairs
+      } else if (latestPrice.digits === 2) {
+        spreadFactor = spread / 100;   // For assets with two decimal places
+      } else if (latestPrice.digits === 1) {
+        spreadFactor = spread / 10;    // For assets with one decimal place
+      } else {
+        spreadFactor = spread / Math.pow(10, latestPrice.digits);  // Default fallback for other cases
+      }
 
       const adjustedBid = parseFloat(latestPrice.bid) + spreadFactor;
       const adjustedAsk = parseFloat(latestPrice.ask) + spreadFactor;
