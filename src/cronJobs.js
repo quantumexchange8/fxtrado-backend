@@ -42,6 +42,20 @@ export const startVolumeCreation = (fastify) => {
       currentDate.setUTCMinutes(currentDate.getUTCMinutes() - 1);
       const date = formatDate(currentDate);
 
+      // Pre-fetch existing records to avoid duplicates
+      const symbolList = forexPairs.map(pair => pair.symbol_pair);
+      const [existingRecords] = await connection.query(
+          `SELECT Symbol, Date, \`group\` 
+           FROM history_charts 
+           WHERE Date = ? AND Symbol IN (?)`,
+          [date, symbolList]
+      );
+      
+      // Create a Set of existing keys (Symbol-Date-Group) for easy lookup
+      const existingKeys = new Set(
+        existingRecords.map(record => `${record.Symbol}-${record.Date}-${record.group}`)
+      );
+
       const insertData = [];
       for (const { symbol_pair, digits } of forexPairs) {
         const [tickData] = await connection.query(
@@ -73,16 +87,20 @@ export const startVolumeCreation = (fastify) => {
             const adjustedOpen = openPrice + spreadFactor;
             const adjustedClose = tempClosePrice + spreadFactor;
 
-            insertData.push([
-              group_name,
-              date,
-              currentDate,
-              adjustedOpen, // Open
-              adjustedOpen, // High
-              adjustedOpen, // Low
-              adjustedClose, // Close
-              symbol_pair
-            ]);
+            // Check if this Symbol-Date-Group already exists in the existingKeys set
+            const recordKey = `${symbol_pair}-${date}-${group_name}`;
+            if (!existingKeys.has(recordKey)) {
+                insertData.push([
+                    group_name,
+                    date,
+                    currentDate,
+                    adjustedOpen, // Open
+                    adjustedOpen, // High
+                    adjustedOpen, // Low
+                    adjustedClose, // Close
+                    symbol_pair
+                ]);
+            }
           });
         }
       }
