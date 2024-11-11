@@ -5,7 +5,7 @@ import fastifyMysql from "@fastify/mysql";
 import axios from 'axios';
 import websocket from '@fastify/websocket';
 import cors from '@fastify/cors';
-import { startVolumeCreation } from './cronJobs.js';
+// import { startVolumeCreation } from './cronJobs.js';
 import { scheduleOpenOrderUpdates } from './orderCalculation.js';
 import { FloatingPLOrder } from './checkFloatingProfit.js';
 // import { schedeEveryMinOHLC } from './livePricing.js';
@@ -132,7 +132,7 @@ const fetchExchangeRate = async () => {
 fastify.register(async function (fastify, opts) {
   scheduleOpenOrderUpdates(fastify);
   FloatingPLOrder(fastify);
-  startVolumeCreation(fastify);
+  // startVolumeCreation(fastify);
   
 });
 
