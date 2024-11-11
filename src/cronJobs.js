@@ -3,6 +3,7 @@ import cron from 'node-cron';
 export const startVolumeCreation = (fastify) => {
   let symbolGroupMap = {};
 
+  // Establish and manage MySQL connection
   const getConnection = async () => {
     try {
       return await fastify.mysql.getConnection();
@@ -11,14 +12,13 @@ export const startVolumeCreation = (fastify) => {
     }
   };
 
-  // Helper function to calculate spread factor based on digits
+  // Helper to calculate spread factor based on digits
   const calculateSpreadFactor = (spread, digits) => spread / Math.pow(10, digits);
 
   // Update symbolGroupMap every second
   const updateSymbolGroupMap = async () => {
     const connection = await getConnection();
     if (!connection) return;
-
     try {
       const [groupSymbols] = await connection.query(
         'SELECT symbol, group_name, spread FROM group_symbols WHERE status = "active"'
@@ -38,14 +38,13 @@ export const startVolumeCreation = (fastify) => {
 
   // Format date as 'YYYY-MM-DD HH:mm:ss.000'
   const formatDate = (date) => {
-    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')} ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}:${String(date.getUTCSeconds()).padStart(2, '0')}.000`;
+    return date.toISOString().slice(0, 19).replace('T', ' ');
   };
 
-  // Function to fetch ticks for the given symbol list within the current minute range
+  // Fetch ticks for a given symbol list within the current minute range
   const getCurrentMinPrice = async (connection, symbolList, currentMinuteStart) => {
-    const currentTime = new Date();
-    const formattedStart = currentMinuteStart.toISOString().slice(0, 19).replace('T', ' ');
-    const formattedEnd = currentTime.toISOString().slice(0, 19).replace('T', ' ');
+    const formattedStart = formatDate(currentMinuteStart);
+    const formattedEnd = formatDate(new Date());
 
     try {
       const [latestTicks] = await connection.query(
@@ -59,23 +58,21 @@ export const startVolumeCreation = (fastify) => {
     }
   };
 
+  // Run high-low price updates
   const runUpdateHighLow = async (connection, date, symbolList) => {
-    const currentMinute = new Date().getUTCMinutes();
     const currentMinuteStart = new Date();
     currentMinuteStart.setUTCSeconds(0, 0);
 
     const updateInterval = setInterval(async () => {
-      const newDate = new Date();
-      const newMinute = newDate.getUTCMinutes();
-  
-      if (newMinute !== currentMinute) {
-        clearInterval(updateInterval); // Stop interval
-        console.log(`Stopped updates for minute: ${currentMinute}`);
+      const newMinute = new Date().getUTCMinutes();
+
+      if (newMinute !== currentMinuteStart.getUTCMinutes()) {
+        clearInterval(updateInterval);
+        console.log(`Stopped updates for minute: ${currentMinuteStart.getUTCMinutes()}`);
         return;
       }
 
       const latestTicks = await getCurrentMinPrice(connection, symbolList, currentMinuteStart);
-
       if (latestTicks.length === 0) {
         console.log("No tick data found for the current minute.");
         return;
@@ -85,13 +82,12 @@ export const startVolumeCreation = (fastify) => {
         const symbolGroups = symbolGroupMap[Symbol] || [];
         const highPrice = Math.max(Bid, Ask);
         const lowPrice = Math.min(Bid, Ask);
-        const closePrice = Bid;
 
         for (const { group_name, spread } of symbolGroups) {
           const spreadFactor = calculateSpreadFactor(spread, digits);
           const roundedHigh = parseFloat((highPrice + spreadFactor).toFixed(digits));
           const roundedLow = parseFloat((lowPrice + spreadFactor).toFixed(digits));
-          const roundedClose = parseFloat((closePrice + spreadFactor).toFixed(digits));
+          const roundedClose = parseFloat((Bid + spreadFactor).toFixed(digits));
 
           await connection.query(
             'UPDATE history_charts SET High = GREATEST(High, ?), Low = LEAST(Low, ?), Close = ? WHERE Symbol = ? AND Date = ? AND `group` = ?',
@@ -99,9 +95,10 @@ export const startVolumeCreation = (fastify) => {
           );
         }
       }
-    }, 1000); // Update every second
+    }, 3000); // Update every second
   };
 
+  // Main cron task to update candlestick data
   cron.schedule('* * * * *', async () => {
     const connection = await getConnection();
     if (!connection) return;
