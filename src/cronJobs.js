@@ -2,6 +2,7 @@ import cron from 'node-cron';
 
 export const startVolumeCreation = (fastify) => {
   let symbolGroupMap = {};
+  let isUpdatingHighLow = false;
 
   // Establish and manage MySQL connection
   const getConnection = async () => {
@@ -60,6 +61,9 @@ export const startVolumeCreation = (fastify) => {
 
   // Run high-low price updates
   const runUpdateHighLow = async (connection, date, symbolList) => {
+    if (isUpdatingHighLow) return;
+
+    isUpdatingHighLow = true;
     const currentMinuteStart = new Date();
     currentMinuteStart.setUTCSeconds(0, 0);
 
@@ -68,6 +72,7 @@ export const startVolumeCreation = (fastify) => {
 
       if (newMinute !== currentMinuteStart.getUTCMinutes()) {
         clearInterval(updateInterval);
+        isUpdatingHighLow = false;
         console.log(`Stopped updates for minute: ${currentMinuteStart.getUTCMinutes()}`);
         return;
       }
