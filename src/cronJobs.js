@@ -49,9 +49,12 @@ export const startVolumeCreation = (fastify) => {
 
     try {
       const [latestTicks] = await connection.query(
-        `SELECT Symbol, Bid, Ask, digits FROM ticks WHERE Symbol IN (?) AND Date BETWEEN ? AND ? ORDER BY Date DESC`,
+        `SELECT Date, Symbol, Bid, Ask, digits FROM ticks WHERE Symbol IN (?) AND Date BETWEEN ? AND ? ORDER BY Date DESC`,
         [symbolList, formattedStart, formattedEnd]
       );
+
+      // console.log('latestTicks', latestTicks)
+
       return latestTicks;
     } catch (err) {
       console.error("Error fetching tick data:", err);
@@ -88,11 +91,19 @@ export const startVolumeCreation = (fastify) => {
         const highPrice = Math.max(Bid, Ask);
         const lowPrice = Math.min(Bid, Ask);
 
+        const symbolTicks = latestTicks.filter(tick => tick.Symbol === Symbol);
+
+        // Sort by Date (in descending order) to get the last tick of the minute
+        const lastTick = symbolTicks.sort((a, b) => new Date(b.Date) - new Date(a.Date))[0];
+
+        // Use the bid from the last tick of the minute
+        const closingBid = lastTick ? lastTick.Bid : Bid;
+
         for (const { group_name, spread } of symbolGroups) {
           const spreadFactor = calculateSpreadFactor(spread, digits);
           const roundedHigh = parseFloat((highPrice + spreadFactor).toFixed(digits));
           const roundedLow = parseFloat((lowPrice + spreadFactor).toFixed(digits));
-          const roundedClose = parseFloat((Bid + spreadFactor).toFixed(digits));
+          const roundedClose = parseFloat((closingBid + spreadFactor).toFixed(digits));
 
           await connection.query(
             'UPDATE history_charts SET High = GREATEST(High, ?), Low = LEAST(Low, ?), Close = ? WHERE Symbol = ? AND Date = ? AND `group` = ?',
