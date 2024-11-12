@@ -67,16 +67,20 @@ export const startVolumeCreation = (fastify) => {
     if (isUpdatingHighLow) return;
 
     isUpdatingHighLow = true;
-    const currentMinuteStart = new Date();
+    let currentMinuteStart = new Date();
     currentMinuteStart.setUTCSeconds(0, 0);
 
     const updateInterval = setInterval(async () => {
+      const now = new Date();
       const newMinute = new Date().getUTCMinutes();
 
       if (newMinute !== currentMinuteStart.getUTCMinutes()) {
+        currentMinuteStart = now;
+        currentMinuteStart.setUTCSeconds(0, 0);
+
         clearInterval(updateInterval);
         isUpdatingHighLow = false;
-        console.log(`Stopped updates for minute: ${currentMinuteStart.getUTCMinutes()}`);
+        console.log(`Stopped updates for minute: ${currentMinuteStart.getUTCMinutes() - 1 }`);
         return;
       }
 
@@ -104,10 +108,13 @@ export const startVolumeCreation = (fastify) => {
           const roundedHigh = parseFloat((highPrice + spreadFactor).toFixed(digits));
           const roundedLow = parseFloat((lowPrice + spreadFactor).toFixed(digits));
           const roundedClose = parseFloat((closingBid + spreadFactor).toFixed(digits));
+          const updateDate = formatDate(currentMinuteStart)
+
+          // console.log('updateDate', updateDate)
 
           await connection.query(
             'UPDATE history_charts SET High = GREATEST(High, ?), Low = LEAST(Low, ?), Close = ? WHERE Symbol = ? AND Date = ? AND `group` = ?',
-            [roundedHigh, roundedLow, roundedClose, Symbol, date, group_name]
+            [roundedHigh, roundedLow, roundedClose, Symbol, updateDate, group_name]
           );
         }
       }
@@ -120,6 +127,9 @@ export const startVolumeCreation = (fastify) => {
     if (!connection) return;
 
     try {
+       // Update symbolGroupMap to ensure latest spread values
+      await updateSymbolGroupMap();
+
       const [forexPairs] = await connection.query('SELECT symbol_pair, digits FROM forex_pairs WHERE status = "active"');
       const currentDate = new Date();
       currentDate.setUTCSeconds(0, 0);

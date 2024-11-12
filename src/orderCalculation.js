@@ -113,7 +113,7 @@ const calculatePL = async (fastify) => {
     for (const order of orders) {
       const latestPrice = latestPriceMap.get(order.symbol);
       if (!latestPrice) {
-        console.error(`No latest price found for symbol: ${order.symbol}`);
+        // console.error(`No latest price found for symbol: ${order.symbol}`);
         continue; // Skip this order if no price is found
       }
 
