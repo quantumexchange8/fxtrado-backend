@@ -93,55 +93,45 @@ export const startVolumeCreation = (fastify) => {
       const casesHigh = [];
       const casesLow = [];
       const casesClose = [];
-      const symbolsGroups = [];
+      const symbolsGroups = new Set();
   
-      for (const { Symbol, Bid, Ask, digits } of latestTicks) {
+      latestTicks.forEach(({ Symbol, Bid, Ask, digits }) => {
         const symbolGroups = symbolGroupMap[Symbol] || [];
         const highPrice = Math.max(Bid, Ask);
         const lowPrice = Math.min(Bid, Ask);
-  
-        const closingBid = latestTicks
-          .filter(tick => tick.Symbol === Symbol)
-          .sort((a, b) => new Date(b.Date) - new Date(a.Date))[0]?.Bid || Bid;
-  
-        for (const { group_name, spread } of symbolGroups) {
+        const closingBid = latestTicks.find(tick => tick.Symbol === Symbol)?.Bid || Bid;
+
+        symbolGroups.forEach(({ group_name, spread }) => {
           const spreadFactor = calculateSpreadFactor(spread, digits);
           const roundedHigh = parseFloat((highPrice + spreadFactor).toFixed(digits));
           const roundedLow = parseFloat((lowPrice + spreadFactor).toFixed(digits));
           const roundedClose = parseFloat((closingBid + spreadFactor).toFixed(digits));
           const formattedDate = formatDate(currentMinuteStart);
-  
-          // Prepare CASE WHEN statements for batch update
-          casesHigh.push(`
-            WHEN Symbol = '${Symbol}' AND Date = '${formattedDate}' AND \`group\` = '${group_name}'
-            THEN GREATEST(High, ${roundedHigh})`);
-          casesLow.push(`
-            WHEN Symbol = '${Symbol}' AND Date = '${formattedDate}' AND \`group\` = '${group_name}'
-            THEN LEAST(Low, ${roundedLow})`);
+
+          casesHigh.push(`WHEN Symbol = '${Symbol}' AND Date = '${formattedDate}' AND \`group\` = '${group_name}' THEN GREATEST(High, ${roundedHigh})`);
+          casesLow.push(`WHEN Symbol = '${Symbol}' AND Date = '${formattedDate}' AND \`group\` = '${group_name}' THEN LEAST(Low, ${roundedLow})`);
           casesClose.push(`WHEN Symbol = '${Symbol}' AND Date = '${formattedDate}' AND \`group\` = '${group_name}' THEN ${roundedClose}`);
-          symbolsGroups.push(`'${Symbol}-${group_name}-${formattedDate}'`);
-        }
+          symbolsGroups.add(`'${Symbol}-${group_name}-${formattedDate}'`);
+        });
+      });
+
+      const updateQuery = `
+        UPDATE history_charts
+        SET 
+          High = CASE ${casesHigh.join(' ')} END,
+          Low = CASE ${casesLow.join(' ')} END,
+          Close = CASE ${casesClose.join(' ')} END
+        WHERE CONCAT(Symbol, '-', \`group\`, '-', Date) IN (${[...symbolsGroups].join(', ')})
+      `;
+  
+      try {
+        await connection.query(updateQuery);
+        // console.log("Batch update completed for OHLC data.");
+      } catch (err) {
+        console.error("Error performing batch update:", err);
       }
   
-      if (casesHigh.length > 0) {
-        // Construct the bulk update query
-        const updateQuery = `
-          UPDATE history_charts
-          SET 
-            High = CASE ${casesHigh.join(' ')} END,
-            Low = CASE ${casesLow.join(' ')} END,
-            Close = CASE ${casesClose.join(' ')} END
-          WHERE CONCAT(Symbol, '-', \`group\`, '-', Date) IN (${symbolsGroups.join(', ')})
-        `;
-  
-        try {
-          await connection.query(updateQuery);
-          // console.log("Batch update completed for OHLC data.");
-        } catch (err) {
-          console.error("Error performing batch update:", err);
-        }
-      }
-    }, 3000); // Update every 3 seconds
+    }, 2000); // Update every 3 seconds
   };
 
   // Main cron task to update candlestick data
