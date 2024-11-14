@@ -322,6 +322,7 @@ fastify.register(async function (fastify) {
                 high: currentOhlcPrice.high,
                 low: currentOhlcPrice.low,
                 close: currentOhlcPrice.close,
+                group: currentOhlcPrice.group,
               })
             );
           });
