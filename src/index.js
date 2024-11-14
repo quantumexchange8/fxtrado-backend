@@ -8,7 +8,7 @@ import cors from '@fastify/cors';
 import { startVolumeCreation } from './cronJobs.js';
 import { scheduleOpenOrderUpdates } from './orderCalculation.js';
 import { FloatingPLOrder } from './checkFloatingProfit.js';
-// import { schedeEveryMinOHLC } from './livePricing.js';
+// import { schedeEveryMinOHLC, scheduleOpenPriceUpdate  } from './livePricing.js';
 import Sensible from '@fastify/sensible'
 
 const fastify = Fastify({
@@ -38,7 +38,7 @@ const OANDA_PRICE_URL = `https://api-fxpractice.oanda.com/v3/accounts/${account_
 fastify.register(fastifyMysql, {
   host: 'host',
   user: 'root',
-  password: '12345',
+  password: 'Test1234.',
   database: 'fxtrado',
   port: '3306',
     promise: true,
@@ -138,6 +138,7 @@ fastify.register(async function (fastify, opts) {
 
 // fastify.register(async function (fastify) {
 //   schedeEveryMinOHLC(fastify); // Pass `fastify` to the scheduler
+//   scheduleOpenPriceUpdate(fastify);
 // });
 
 setInterval(fetchExchangeRate, 1000);
@@ -226,6 +227,24 @@ const getAllLatestPrices = async (forexPairs) => {
   return result;
 };
 
+const getLiveHistoryCandle = async (forexPairs) => {
+  const now = new Date();
+  const nowFormatted = `${now.getUTCFullYear()}-${
+    String(now.getUTCMonth() + 1).padStart(2, '0')}-${
+    String(now.getUTCDate()).padStart(2, '0')} ${
+    String(now.getUTCHours()).padStart(2, '0')}:${
+    String(now.getUTCMinutes()).padStart(2, '0')}:00`;
+
+  const [result] = await fastify.mysql.query(
+    `SELECT symbol, open, high, low, close, \`group\`
+     FROM history_charts 
+     WHERE symbol IN (?) AND Date = ? `,
+    [forexPairs.map(pair => pair.symbol_pair), nowFormatted]
+  );
+  
+  return result;
+}
+
 
 fastify.register(async function (fastify) {
 
@@ -278,6 +297,54 @@ fastify.register(async function (fastify) {
     connection.on('error', (error) => {
       console.error('WebSocket error:', error);
       connectedClients.delete(connection);
+    });
+  });
+});
+
+const liveCandleClient = new Set();
+fastify.register(async function (fastify) {
+
+  fastify.get('/live_candle', { websocket: true }, async (connection, req) => {
+    console.log('Client live connected!');
+    liveCandleClient.add(connection);
+
+    const sendOHLCToClient = async () => {
+      const forexPairs = await getActiveForexPairs(); // Fetch active pairs
+      const currentOhlcPrices = await getLiveHistoryCandle(forexPairs); // Get latest prices
+
+      liveCandleClient.forEach(client => {
+        if (client.readyState === client.OPEN) {
+          currentOhlcPrices.forEach(currentOhlcPrice => {
+            client.send(
+              JSON.stringify({
+                symbol: currentOhlcPrice.symbol,
+                open: currentOhlcPrice.open,
+                high: currentOhlcPrice.high,
+                low: currentOhlcPrice.low,
+                close: currentOhlcPrice.close,
+              })
+            );
+          });
+        }
+      });
+    };
+
+    // Initial price fetch and send
+    await sendOHLCToClient();
+
+    // Set up the interval for sending updated prices
+    const interval = setInterval(async () => {
+      await sendOHLCToClient(); // Send updated prices every second
+    }, 1000);
+
+    connection.on('close', () => {
+      liveCandleClient.delete(connection);
+      console.log('Client disconnected');
+    });
+
+    connection.on('error', (error) => {
+      console.error('WebSocket error:', error);
+      liveCandleClient.delete(connection);
     });
   });
 });
