@@ -36,12 +36,13 @@ const OANDA_PRICE_URL = `https://api-fxpractice.oanda.com/v3/accounts/${account_
 
 // Database Access
 fastify.register(fastifyMysql, {
-  host: 'host',
+  host: '127.0.0.1',
   user: 'root',
   password: 'Test1234.',
   database: 'fxtrado',
   port: '3306',
-    promise: true,
+  promise: true,
+  connectionLimit: 30,
 });
 
 let exchangeRateData = {};

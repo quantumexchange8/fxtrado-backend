@@ -47,7 +47,6 @@ export const startVolumeCreation = (fastify) => {
         `SELECT Symbol, Bid, Ask, digits FROM ticks WHERE Symbol IN (?) AND Date = (SELECT MAX(Date) FROM ticks WHERE symbol = ticks.symbol)`,
         [symbolList]
       );
-
       return ticks.reduce((acc, { Symbol, Bid, Ask, digits }) => {
         acc[Symbol] = { Bid, Ask, digits };
         return acc;
@@ -59,49 +58,69 @@ export const startVolumeCreation = (fastify) => {
   };
 
   // Insert new row at the start of each minute
-  const insertNewMinuteRows = async (connection, symbolList, date) => {
+  // Insert new row at the start of each minute
+  const insertNewMinuteRows = async (connection, date) => {
 
-    console.log('now date', new Date())
-    const [forexPairs] = await connection.query(
-      'SELECT symbol_pair, digits FROM forex_pairs WHERE status = "active"'
-    );
-    const latestTicks = await fetchLatestTicks(connection, symbolList);
+    try {
 
-    const insertData = [];
+      const [forexPairs] = await connection.query('SELECT symbol_pair, digits FROM forex_pairs WHERE status = "active"');
 
-    forexPairs.forEach(({ symbol_pair, digits }) => {
-      const tick = latestTicks[symbol_pair];
-      if (tick) {
+      const symbolList = forexPairs.map(pair => pair.symbol_pair);
+
+      const latestTicks = await fetchLatestTicks(connection, symbolList);
+
+
+      const insertData = [];
+
+      // Prebuild the insert data
+      forexPairs.forEach(({ symbol_pair, digits }) => {
+        const tick = latestTicks[symbol_pair];
+        if (!tick) return; // Skip if no tick data for symbol
+
         const { Bid, Ask } = tick;
         const symbolGroups = symbolGroupMap[symbol_pair] || [];
 
+
+        // Precompute spread-adjusted Bid and Ask
         symbolGroups.forEach(({ group_name, spread }) => {
           const spreadFactor = calculateSpreadFactor(spread, digits);
+          const adjustedBid = parseFloat((Bid + spreadFactor).toFixed(digits));
+          const adjustedAsk = parseFloat((Ask + spreadFactor).toFixed(digits));
+
+
           insertData.push([
-            group_name,
-            date,
-            new Date(),
-            parseFloat((Bid + spreadFactor).toFixed(digits)),
-            parseFloat((Bid + spreadFactor).toFixed(digits)),
-            parseFloat((Bid + spreadFactor).toFixed(digits)),
-            parseFloat((Ask + spreadFactor).toFixed(digits)),
-            symbol_pair
+            group_name,    // group
+            date,          // Date (UTC minute)
+            new Date(),    // local_date (server time)
+            adjustedBid,   // Open price
+            adjustedBid,   // High price
+            adjustedBid,   // Low price
+            adjustedAsk,   // Close price
+            symbol_pair    // Symbol
           ]);
         });
-      }
-    });
+      });
 
-    if (insertData.length) {
-      await connection.query(
-        'INSERT INTO history_charts (`group`, Date, local_date, Open, High, Low, Close, Symbol) VALUES ?',
-        [insertData]
-      );
+      // Execute the batch insert if data exists
+      if (insertData.length) {
+        await connection.query(
+          'INSERT INTO history_charts (`group`, Date, local_date, Open, High, Low, Close, Symbol) VALUES ?',
+          [insertData]
+        );
+      }
+    } catch (err) {
+      console.error("Error inserting new minute rows:", err);
     }
   };
 
+
   // Update the latest row with high, low, close prices
-  const updateCurrentMinuteRows = async (connection, symbolList, date) => {
+  const updateCurrentMinuteRows = async (connection, symbolList) => {
+    const now = new Date();
+    now.setUTCSeconds(0, 0);
+    const date = formatDate(now);
     const latestTicks = await fetchLatestTicks(connection, symbolList);
+
     const casesHigh = [];
     const casesLow = [];
     const casesClose = [];
@@ -140,50 +159,39 @@ export const startVolumeCreation = (fastify) => {
     }
   };
 
-  // Persistent update loop for the current minute
-  const startUpdateLoop = (symbolList) => {
-    setInterval(async () => {
-      const now = new Date();
-      now.setUTCSeconds(0, 0);
-      const date = formatDate(now);
-
-      if (!currentMinute || currentMinute !== date) {
-        currentMinute = date;
-        return;
-      }
-
-      const connection = await getConnection();
-      if (connection) {
-        try {
-          await updateCurrentMinuteRows(connection, symbolList, date);
-        } catch (err) {
-          console.error("Error updating current minute rows:", err);
-        } finally {
-          connection.release();
-        }
-      }
-    }, 1000);
-  };
-
-  // Main cron task
+  // Cron for inserting new rows
   cron.schedule('* * * * *', async () => {
+    
     const connection = await getConnection();
     if (!connection) return;
 
     try {
       const date = formatDate(new Date(new Date().setUTCSeconds(0, 0)));
+
+      // Insert new rows for the current minute
+      await insertNewMinuteRows(connection, date);
+    } catch (err) {
+      console.error("Error in cron task:", err);
+    } finally {
+      connection.release();
+    }
+  });
+
+  // Cron for updating current minute rows
+  cron.schedule('* * * * * *', async () => {
+    const connection = await getConnection();
+    if (!connection) return;
+
+    try {
       const [forexPairs] = await connection.query(
         'SELECT symbol_pair FROM forex_pairs WHERE status = "active"'
       );
       const symbolList = forexPairs.map(pair => pair.symbol_pair);
 
-      // Insert new rows for the current minute
-      await insertNewMinuteRows(connection, symbolList, date);
-
-      // Start the update loop
-      startUpdateLoop(symbolList);
+      // Update rows for the current minute
+      await updateCurrentMinuteRows(connection, symbolList);
     } catch (err) {
-      console.error("Error in cron task:", err);
+      console.error("Error in update cron task:", err);
     } finally {
       connection.release();
     }
