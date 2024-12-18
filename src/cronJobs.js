@@ -71,36 +71,41 @@ export const startVolumeCreation = (fastify) => {
 
 
       const insertData = [];
-
-      // Prebuild the insert data
-      forexPairs.forEach(({ symbol_pair, digits }) => {
+  
+      for (const { symbol_pair, digits } of forexPairs) {
         const tick = latestTicks[symbol_pair];
-        if (!tick) return; // Skip if no tick data for symbol
-
+        if (!tick) continue;
+  
         const { Bid, Ask } = tick;
         const symbolGroups = symbolGroupMap[symbol_pair] || [];
-
-
-        // Precompute spread-adjusted Bid and Ask
-        symbolGroups.forEach(({ group_name, spread }) => {
+  
+        for (const { group_name, spread } of symbolGroups) {
           const spreadFactor = calculateSpreadFactor(spread, digits);
           const adjustedBid = parseFloat((Bid + spreadFactor).toFixed(digits));
           const adjustedAsk = parseFloat((Ask + spreadFactor).toFixed(digits));
-
-
-          insertData.push([
-            group_name,    // group
-            date,          // Date (UTC minute)
-            new Date(),    // local_date (server time)
-            adjustedBid,   // Open price
-            adjustedBid,   // High price
-            adjustedBid,   // Low price
-            adjustedAsk,   // Close price
-            symbol_pair    // Symbol
-          ]);
-        });
-      });
-
+  
+          // Check if a record already exists
+          const [existingRow] = await connection.query(
+            'SELECT 1 FROM history_charts WHERE `group` = ? AND `Date` = ? AND `Symbol` = ? LIMIT 1',
+            [group_name, date, symbol_pair]
+          );
+  
+          if (!existingRow.length) {
+            // Prepare data for batch insert
+            insertData.push([
+              group_name,    // group
+              date,          // Date (UTC minute)
+              new Date(),    // local_date (server time)
+              adjustedBid,   // Open price
+              adjustedBid,   // High price
+              adjustedBid,   // Low price
+              adjustedAsk,   // Close price
+              symbol_pair    // Symbol
+            ]);
+          }
+        }
+      }
+  
       // Execute the batch insert if data exists
       if (insertData.length) {
         await connection.query(
