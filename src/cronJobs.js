@@ -5,13 +5,17 @@ export const startVolumeCreation = (fastify) => {
   let currentMinute = null;
 
   // Establish and manage MySQL connection
-  const getConnection = async () => {
+  const getConnection = async (retries = 5, delay = 1000) => {
+  while (retries > 0) {
     try {
       return await fastify.mysql.getConnection();
     } catch (err) {
       console.error("Error obtaining database connection:", err);
+      if (--retries > 0) await new Promise(res => setTimeout(res, delay));
     }
-  };
+  }
+  return null;
+};
 
   // Helper to calculate spread factor based on digits
   const calculateSpreadFactor = (spread, digits) => spread / Math.pow(10, digits);
@@ -22,7 +26,7 @@ export const startVolumeCreation = (fastify) => {
     if (!connection) return;
     try {
       const [groupSymbols] = await connection.query(
-        'SELECT symbol, group_name, spread FROM group_symbols WHERE status = "active"'
+        'SELECT symbol, spread FROM group_symbols WHERE status = "active" AND group_name = "Std" '
       );
       symbolGroupMap = groupSymbols.reduce((acc, { symbol, group_name, spread }) => {
         if (!acc[symbol]) acc[symbol] = [];
@@ -58,7 +62,6 @@ export const startVolumeCreation = (fastify) => {
   };
 
   // Insert new row at the start of each minute
-  // Insert new row at the start of each minute
   const insertNewMinuteRows = async (connection, date) => {
 
     try {
@@ -71,7 +74,8 @@ export const startVolumeCreation = (fastify) => {
 
 
       const insertData = [];
-  
+      const currentTime = new Date();
+
       for (const { symbol_pair, digits } of forexPairs) {
         const tick = latestTicks[symbol_pair];
         if (!tick) continue;
@@ -95,7 +99,7 @@ export const startVolumeCreation = (fastify) => {
             insertData.push([
               group_name,    // group
               date,          // Date (UTC minute)
-              new Date(),    // local_date (server time)
+              currentTime,    // local_date (server time)
               adjustedBid,   // Open price
               adjustedBid,   // High price
               adjustedBid,   // Low price
@@ -131,13 +135,13 @@ export const startVolumeCreation = (fastify) => {
     const casesClose = [];
     const symbolsGroups = new Set();
 
-    Object.entries(latestTicks).forEach(([Symbol, { Bid, Ask, digits }]) => {
+    for (const [Symbol, { Bid, Ask, digits }] of Object.entries(latestTicks)) {
       const highPrice = Math.max(Bid, Ask);
       const lowPrice = Math.min(Bid, Ask);
       const closingBid = Bid;
       const symbolGroups = symbolGroupMap[Symbol] || [];
 
-      symbolGroups.forEach(({ group_name, spread }) => {
+      for (const { group_name, spread } of symbolGroups) {
         const spreadFactor = calculateSpreadFactor(spread, digits);
         const roundedHigh = parseFloat((highPrice + spreadFactor).toFixed(digits));
         const roundedLow = parseFloat((lowPrice + spreadFactor).toFixed(digits));
@@ -147,19 +151,18 @@ export const startVolumeCreation = (fastify) => {
         casesLow.push(`WHEN Symbol = '${Symbol}' AND Date = '${date}' AND \`group\` = '${group_name}' THEN LEAST(Low, ${roundedLow})`);
         casesClose.push(`WHEN Symbol = '${Symbol}' AND Date = '${date}' AND \`group\` = '${group_name}' THEN ${roundedClose}`);
         symbolsGroups.add(`'${Symbol}-${group_name}-${date}'`);
-      });
-    });
-
-    const updateQuery = `
-      UPDATE history_charts
-      SET 
-        High = CASE ${casesHigh.join(' ')} END,
-        Low = CASE ${casesLow.join(' ')} END,
-        Close = CASE ${casesClose.join(' ')} END
-      WHERE CONCAT(Symbol, '-', \`group\`, '-', Date) IN (${[...symbolsGroups].join(', ')});
-    `;
+      }
+    }
 
     if (casesHigh.length) {
+      const updateQuery = `
+        UPDATE history_charts
+        SET 
+          High = CASE ${casesHigh.join(' ')} END,
+          Low = CASE ${casesLow.join(' ')} END,
+          Close = CASE ${casesClose.join(' ')} END
+        WHERE CONCAT(Symbol, '-', \`group\`, '-', Date) IN (${[...symbolsGroups].join(', ')});
+      `;
       await connection.query(updateQuery);
     }
   };
