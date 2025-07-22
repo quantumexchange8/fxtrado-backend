@@ -217,16 +217,22 @@ const getActiveForexPairs = async () => {
 };
 
 const getAllLatestPrices = async (forexPairs) => {
+  if (!forexPairs.length) return [];
   const [result] = await fastify.mysql.query(
-    `SELECT symbol, bid, ask, digits
-     FROM ticks 
-     WHERE symbol IN (?) 
-     AND Date = (SELECT MAX(Date) FROM ticks WHERE symbol = ticks.symbol)`,
+    `SELECT t1.symbol, t1.bid, t1.ask, t1.digits
+     FROM ticks t1
+     INNER JOIN (
+       SELECT symbol, MAX(Date) as MaxDate
+       FROM ticks
+       WHERE symbol IN (?)
+       GROUP BY symbol
+     ) t2 ON t1.symbol = t2.symbol AND t1.Date = t2.MaxDate`,
     [forexPairs.map(pair => pair.symbol_pair)]
   );
-  
   return result;
 };
+
+let priceBroadcastInterval;
 
 const getLiveHistoryCandle = async (forexPairs) => {
   const now = new Date();
@@ -248,57 +254,52 @@ const getLiveHistoryCandle = async (forexPairs) => {
 
 
 fastify.register(async function (fastify) {
-
   fastify.get('/forex_pair', { websocket: true }, async (connection, req) => {
     console.log('Client connected!');
     connectedClients.add(connection);
 
-    connection.on('open', () => {
-      console.log('WebSocket connection opened');
-      console.log('1', connection.readyState);
-      console.log('2', connection.OPEN);
-    });
-
-    // Function to fetch and send the latest prices
-    const sendPricesToClient = async () => {
-      const forexPairs = await getActiveForexPairs(); // Fetch active pairs
-      const latestPrices = await getAllLatestPrices(forexPairs); // Get latest prices
-
-      connectedClients.forEach(client => {
-        if (client.readyState === client.OPEN) {
-          latestPrices.forEach(latestPrice => {
-            client.send(
-              JSON.stringify({
-                symbol: latestPrice.symbol,
-                bid: latestPrice.bid,
-                ask: latestPrice.ask,
-                digits: latestPrice.digits,
-              })
-            );
-          });
-        }
-      });
-    };
-
-    // Initial price fetch and send
-    await sendPricesToClient();
-
-    // Set up the interval for sending updated prices
-    const interval = setInterval(async () => {
-      await sendPricesToClient(); // Send updated prices every second
-    }, 1000);
-
-    // Handle socket close event
+    // Handle client disconnect
     connection.on('close', () => {
-      clearInterval(interval); // Clear the interval to avoid memory leaks
-      connectedClients.delete(connection); // Remove the client from the set
+      connectedClients.delete(connection);
       console.log('Client disconnected');
+
+      // Stop interval if no clients left
+      if (connectedClients.size === 0 && priceBroadcastInterval) {
+        clearInterval(priceBroadcastInterval);
+        priceBroadcastInterval = null;
+        console.log('Stopped price broadcast interval');
+      }
     });
 
-    connection.on('error', (error) => {
-      console.error('WebSocket error:', error);
+    connection.on('error', (err) => {
+      console.error('WebSocket error:', err);
       connectedClients.delete(connection);
     });
+
+    // Start shared broadcast interval if not already running
+    if (!priceBroadcastInterval) {
+      console.log('Starting price broadcast interval...');
+      priceBroadcastInterval = setInterval(async () => {
+        try {
+          const forexPairs = await getActiveForexPairs();
+          const latestPrices = await getAllLatestPrices(forexPairs);
+
+          // Broadcast to all connected clients
+          const payload = JSON.stringify({
+            timestamp: Date.now(),
+            prices: latestPrices,
+          });
+
+          connectedClients.forEach(client => {
+            if (client.readyState === client.OPEN) {
+              client.send(payload);
+            }
+          });
+        } catch (err) {
+          console.error('Error fetching prices:', err);
+        }
+      }, 1000); // every second
+    }
   });
 });
 

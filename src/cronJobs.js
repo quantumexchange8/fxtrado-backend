@@ -26,7 +26,7 @@ export const startVolumeCreation = (fastify) => {
     if (!connection) return;
     try {
       const [groupSymbols] = await connection.query(
-        'SELECT symbol, spread FROM group_symbols WHERE status = "active" AND group_name = "Std" '
+        'SELECT symbol, group_name, spread FROM group_symbols WHERE status = "active"'
       );
       symbolGroupMap = groupSymbols.reduce((acc, { symbol, group_name, spread }) => {
         if (!acc[symbol]) acc[symbol] = [];
