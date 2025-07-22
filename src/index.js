@@ -104,7 +104,17 @@ const fetchExchangeRate = async () => {
         const symbolPair = symbol_pair;
         const digit = digits;
 
-        return [date, symbolPair, bid, ask, digit, remark];
+        function getPipValueFromDigits(digit) {
+          return 1 / Math.pow(10, digit - 1);
+        }
+
+        const pipValue = getPipValueFromDigits(digit);
+
+        const rawSpread = ask - bid;
+        const spread = parseFloat(rawSpread.toFixed(digit)); // Calculate spread
+        const spreadPips = parseFloat((rawSpread / pipValue).toFixed(1));; // 1.5
+
+        return [date, symbolPair, bid, ask, spread, spreadPips, digit, remark];
       } catch (error) {
         console.error(`Failed to fetch data for ${currency_pair}:`, error.message);
         return null; // Return null if the request fails
@@ -116,7 +126,7 @@ const fetchExchangeRate = async () => {
 
     if (results.length > 0) {
       await connection.query(
-        'INSERT INTO ticks (Date, Symbol, Bid, Ask, digits, Remark) VALUES ?',
+        'INSERT INTO ticks (Date, Symbol, Bid, Ask, Spread, SpreadPips, digits, Remark) VALUES ?',
         [results]
       );
     }
@@ -219,7 +229,7 @@ const getActiveForexPairs = async () => {
 const getAllLatestPrices = async (forexPairs) => {
   if (!forexPairs.length) return [];
   const [result] = await fastify.mysql.query(
-    `SELECT t1.symbol, t1.bid, t1.ask, t1.digits
+    `SELECT t1.symbol, t1.bid, t1.ask, t1.spread, t1.spreadpips, t1.digits
      FROM ticks t1
      INNER JOIN (
        SELECT symbol, MAX(Date) as MaxDate
