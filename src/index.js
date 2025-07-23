@@ -294,10 +294,21 @@ fastify.register(async function (fastify) {
           const forexPairs = await getActiveForexPairs();
           const latestPrices = await getAllLatestPrices(forexPairs);
 
+          const uniquePrices = [];
+          const seenSymbols = new Set();
+
+          for (const price of latestPrices) {
+            if (!seenSymbols.has(price.symbol)) {
+              uniquePrices.push(price);
+              seenSymbols.add(price.symbol);
+            }
+          }
+
           // Broadcast to all connected clients
           const payload = JSON.stringify({
             timestamp: Date.now(),
-            prices: latestPrices,
+            active_symbols: forexPairs,
+            prices: uniquePrices,
           });
 
           connectedClients.forEach(client => {
